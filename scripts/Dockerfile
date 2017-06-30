@@ -138,6 +138,7 @@ WORKDIR maskgen/setuptools-version
 RUN python setup.py sdist
 RUN pip install -e .
 WORKDIR ..
+RUN git pull
 RUN python setup.py sdist
 RUN pip install -e .
 WORKDIR ..
