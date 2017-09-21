@@ -464,6 +464,8 @@ class MakeGenUI(Frame):
         return [tuple(x) for x in self.scModel.getProjectData('typespref')]
 
 
+    def updateJT(self):
+        UpdaterGitAPI().update()
 
     def nextadd(self):
         val = tkFileDialog.askopenfilename(initialdir=self.scModel.get_dir(), title="Select image file",
@@ -944,6 +946,7 @@ class MakeGenUI(Frame):
         filemenu.add_cascade(label="Properties", command=self.getproperties)
         filemenu.add_cascade(label="Rename to Base Image", command=self.renametobase)
         filemenu.add_cascade(label="System Check", command=self.systemcheck)
+        filemenu.add_cascade(label="Update JT", command=self.updateJT)
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.quit, accelerator="Ctrl+Q")
         filemenu.add_command(label="Quit without Save", command=self.quitnosave)

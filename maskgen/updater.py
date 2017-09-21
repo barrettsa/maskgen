@@ -2,6 +2,8 @@ import requests
 import json
 import logging
 import maskgen
+import wget
+from subprocess import Popen, PIPE
 
 """
 Git API used to compare version of the tool with lastest on GitHub master
@@ -13,6 +15,7 @@ class UpdaterGitAPI:
     #file = 'https://raw.githubusercontent.com/rwgdrummer/maskgen/VersionScanner/VERSION'
     repos = 'rwgdrummer/maskgen'
     url = 'https://api.github.com/repos'
+    zip = 'https://github.com/' + repos + '/archive/master.zip'
 
     def __init__(self):
         pass
@@ -69,3 +72,29 @@ class UpdaterGitAPI:
         if self._hasNotPassed( merge_sha):
             return (merge_sha, self._getCommitMessage(merge_sha))
         return None,None
+
+    def update(self):
+        import zipfile
+        import sys
+        import os
+        import platform
+        if os.path.exists('maskgen-master.zip'):
+            os.remove('maskgen-master.zip')
+        wget.download(self.zip)
+        places =[place for place in sys.path if
+                               place.endswith('maskgen-master') and os.path.exists(os.path.join(place, 'scripts'))]
+        if len(places) == 0:
+            raise ValueError("Maskgen not installed zip file")
+        place  = places[1]
+        with zipfile.ZipFile('maskgen-master.zip') as myzip:
+            myzip.extractall(path=os.path.split(place)[0])
+        if sys.platform.startswith('win'):
+            command = 'update_dos.bat'
+        else:
+            command = 'update_unix.sh'
+        p = Popen([os.path.join(place, 'scripts' + os.sep + command)], stderr=PIPE, stdout=PIPE, shell=True)
+        results = p.communicate()
+        for result in results:
+            print str(result)
+        os.execv(__file__, sys.argv)
+        os.path.exit(0)

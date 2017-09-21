@@ -654,7 +654,7 @@ def interpolateMask(mask, startIm, destIm, invert=False, arguments=dict()):
             for contour in contours:
                 for point in contour:
                     if type(point[0]) is np.ndarray:
-                        point = point[0]
+                        point = point[0]f
                     if minpoint is None:
                         minpoint = point
                     else:
