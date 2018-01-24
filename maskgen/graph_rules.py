@@ -1,7 +1,7 @@
 from software_loader import getOperations, SoftwareLoader, getProjectProperties, getRule
 from tool_set import validateAndConvertTypedValue, openImageFile, fileTypeChanged, fileType, \
     getMilliSecondsAndFrameCount, toIntTuple, differenceBetweeMillisecondsAndFrame, \
-    getDurationStringFromMilliseconds, getFileMeta,  openImage
+    getDurationStringFromMilliseconds, getFileMeta,  openImage, getValue,getMilliSeconds
 import new
 from types import MethodType
 import numpy
@@ -74,9 +74,7 @@ def missing_donor_inputmask(edge, dir):
              len(edge['inputmaskname']) == 0 or
              not os.path.exists(os.path.join(dir, edge['inputmaskname']))) and \
             (edge['op'] == 'PasteSampled' and \
-             'arguments' in edge and \
-             'purpose' in edge['arguments'] and \
-             edge['arguments']['purpose'] == 'clone') or
+                getValue(edge,'arguments.purpose') == 'clone') or
             edge['op'] == 'TransformMove')
 
 
@@ -85,9 +83,7 @@ def eligible_donor_inputmask(edge):
             edge['inputmaskname'] is not None and \
             len(edge['inputmaskname']) > 0 and \
             edge['op'] == 'PasteSampled' and \
-            'arguments' in edge and \
-            'purpose' in edge['arguments'] and \
-            edge['arguments']['purpose'] == 'clone')
+            getValue(edge,'arguments.purpose') == 'clone')
 
 
 def eligible_for_donor(edge):
@@ -192,6 +188,32 @@ def test_api(apitoken, url):
     except Exception as e:
         return "Error calling external service: {} : {}".format(baseurl, str(e.message))
     return None
+
+
+def get_journal_exporttime(journalname, apitoken, url):
+    import requests
+    import json
+    if url is None:
+        logging.getLogger('maskgen').critical('Missing external service URL.  Check settings')
+        return []
+    try:
+        url = url[:-1] if url.endswith('/') else url
+        headers = {'Authorization': 'Token ' + apitoken, 'Content-Type': 'application/json'}
+
+        url = url + "/journals/filters/?fields=journal"
+        data = '{ "name": { "type": "exact", "value": "' + journalname + '" }}'
+        response = requests.post(url, data=data, headers=headers)
+        if response.status_code == requests.codes.ok:
+            r = json.loads(response.content)
+            if 'results' in r:
+                for item in r['results']:
+                    return item["journal"]["graph"]["exporttime"]
+        else:
+            logging.getLogger('maskgen').error("Unable to connect to service: {}".format(response.text))
+
+    except Exception as e:
+        logging.getLogger('maskgen').error("Error calling external service: " + str(e))
+        logging.getLogger('maskgen').critical("Cannot reach external service")
 
 
 def get_fields(filename, apitoken, url):
@@ -434,9 +456,9 @@ def check_masks(edge, op, graph, frm, to):
             intersection = inputmask * mask
             leftover_mask = mask - intersection
             leftover_inputmask = inputmask - intersection
-            masksize = sum(sum(leftover_mask))
-            inputmasksize = sum(sum(leftover_inputmask))
-            intersectionsize = sum(sum(intersection))
+            masksize = np.sum(leftover_mask)
+            inputmasksize = np.sum(leftover_inputmask)
+            intersectionsize =np.sum(intersection)
             if inputmasksize == 0 and intersectionsize == 0:
                 return ['input mask does not represent moved pixels. It is empty.']
             ratio_of_intersection = float(intersectionsize) / float(inputmasksize)
@@ -690,11 +712,10 @@ def checkFrameTimes(op, graph, frm, to):
             et = getMilliSecondsAndFrameCount(v)
         elif k.endswith('Start Time'):
             st = getMilliSecondsAndFrameCount(v)
-    if st is None and et is None:
+    if et is None:
         return None
-    st = st if st is not None else (0, 0)
-    et = et if et is not None else (0, 0)
-    if st[0] > et[0] or (st[0] == et[0] and st[1] >= et[1] and st[1] > 0):
+    st = st if st is not None else (0, 1)
+    if st[0] > et[0] or (st[0] == et[0] and st[1] > et[1] and st[1] > 0):
         return 'Start Time occurs after End Time'
     return None
 
@@ -795,6 +816,10 @@ def checkChannelLoss(op, graph, frm, to):
     if len(metaBefore) > len(metaAfter):
         return 'change in the number of streams occurred'
 
+def checkEmpty(op,graph, frm, to):
+    edge = graph.get_edge(frm, to)
+    if getValue(edge, 'empty mask')  == 'yes':
+        return "An empty change mask indicating an manipulation did not occur."
 
 def checkSameChannels(op, graph, frm, to):
     """
@@ -950,7 +975,7 @@ def checkLevelsVsCurves(op, graph, frm, to):
 
     # The lag-one autocorrelation will serve as a score and has a reasonably straightforward statistical interpretation too.
     if corrs1[1] < 0.9:
-        print '[Warning] Verify this operation was performed with Levels rather than Curves'
+        return '[Warning] Verify this operation was performed with Levels rather than Curves'
     return None
 
 
@@ -1036,8 +1061,8 @@ def check_local_warn(op, graph, frm, to):
     edge = graph.get_edge(frm, to)
     included_in_composite = 'recordMaskInComposite' in edge and edge['recordMaskInComposite'] == 'yes'
     is_global = 'global' in edge and edge['global'] == 'yes'
-    if not is_global and not included_in_composite and op.category not in ['Output', 'Transform']:
-        return '[Warning] Operation link appears affect local area in the image and should be included in the composite mask'
+    if not is_global and not included_in_composite and op.category not in ['Output', 'AntiForensic','Laundering','PostProcessing']:
+        return '[Warning] Operation link appears to affect local area in the image; should be included in the composite mask'
     return None
 
 
@@ -1318,15 +1343,15 @@ def checkPasteFrameLength(op, graph, frm, to):
     diff = 0
     duration = 0
     if 'duration' in from_node and 'duration' in to_node:
-        from_duration = getMilliSecondsAndFrameCount(from_node['duration'])[0]
-        to_duration = getMilliSecondsAndFrameCount(to_node['duration'])[0]
+        from_duration = getMilliSeconds(from_node['duration'])
+        to_duration = getMilliSeconds(to_node['duration'])
         donor_tuple = getDonor(graph, to)
         if donor_tuple is None:
             return "Missing donor"
         else:
             donor_node = graph.get_node(donor_tuple[0])
             if donor_node is not None and 'duration' in donor_node:
-                duration = getMilliSecondsAndFrameCount(donor_node['duration'])[0]
+                duration = getMilliSeconds(donor_node['duration'])
                 diff = (to_duration - from_duration) - duration
             else:
                 return "Missing duration in donor node's meta-data"
@@ -1372,9 +1397,7 @@ def seamCarvingCheck(op, graph, frm, to):
              @type frm: str
              @type to: str
     """
-    change = getSizeChange(graph, frm, to)
-    if change is not None and change[0] != 0 and change[1] != 0:
-        return 'seam carving should not alter both dimensions of an image'
+    #change = getSizeChange(graph, frm, to)
     return None
 
 
@@ -1478,47 +1501,7 @@ def getOrientationFromMetaData(edge):
     return ''
 
 
-def getValue(obj, path, defaultValue=None, convertFunction=None):
-    """"Return the value as referenced by the path in the embedded set of dictionaries as referenced by an object
-        obj is a node or edge
-        path is a dictionary path: a.b.c
-        convertFunction converts the value
 
-        This function recurses
-    """
-    if not path:
-        return convertFunction(obj) if convertFunction and obj else obj
-
-    current = obj
-    part = path
-    splitpos = path.find(".")
-
-    if splitpos > 0:
-        part = path[0:splitpos]
-        path = path[splitpos + 1:]
-    else:
-        path = None
-
-    bpos = part.find('[')
-    pos = 0
-    if bpos > 0:
-        pos = int(part[bpos + 1:-1])
-        part = part[0:bpos]
-
-    if part in current:
-        current = current[part]
-        if type(current) is list or type(current) is tuple:
-            if bpos > 0:
-                current = current[pos]
-            else:
-                result = []
-                for item in current:
-                    v = getValue(item, path, defaultValue=defaultValue, convertFunction=convertFunction)
-                    if v:
-                        result.append(v)
-                return result
-        return getValue(current, path, defaultValue=defaultValue, convertFunction=convertFunction)
-    return defaultValue
 
 
 def blurLocalRule(scModel, edgeTuples):
@@ -1626,9 +1609,7 @@ def spatialSplice(scModel, edgeTuples):
                                       edgeTuple.edge['arguments']['purpose'] == 'add')):
             return 'yes'
         if edgeTuple.edge['op'] == 'PasteImageSpliceToFrame' and \
-                        'arguments' in edgeTuple.edge and \
-                        'purpose' in edgeTuple.edge['arguments'] and \
-                        edgeTuple.edge['arguments']['purpose'] == 'clone':
+            getValue(edgeTuple.edge, 'arguments.purpose') == 'clone':
             return 'yes'
     return 'no'
 
@@ -1638,9 +1619,7 @@ def spatialRemove(scModel, edgeTuples):
         if scModel.getNodeFileType(edgeTuple.start) != 'video':
             continue
         if edgeTuple.edge['op'] in ['PasteSampled', 'PasteOverlay', 'PasteImageSpliceToFrame'] and \
-                        'arguments' in edgeTuple.edge and \
-                        'purpose' in edgeTuple.edge['arguments'] and \
-                        edgeTuple.edge['arguments']['purpose'] == 'remove':
+                        getValue(edgeTuple.edge,'arguments.purpose') == 'remove':
             return 'yes'
     return 'no'
 
@@ -1650,20 +1629,15 @@ def spatialMovingObject(scModel, edgeTuples):
         if scModel.getNodeFileType(edgeTuple.start) != 'video':
             continue
         if edgeTuple.edge['op'] in ['PasteSampled', 'PasteOverlay', 'PasteImageSpliceToFrame'] and \
-                        'arguments' in edgeTuple.edge and \
-                        'motion mapping' in edgeTuple.edge['arguments'] and \
-                        edgeTuple.edge['arguments']['motion mapping'] == 'yes':
+                        getValue(edgeTuple.edge, 'arguments.motion mapping') == 'yes':
             return 'yes'
     return 'no'
 
 
 def voiceSwap(scModel, edgeTuples):
     for edgeTuple in edgeTuples:
-        if 'arguments' in edgeTuple.edge and \
-                        'voice' in edgeTuple.edge['arguments'] and \
-                        edgeTuple.edge['arguments']['voice'] == 'yes' and \
-                        'add type' in edgeTuple.edge['arguments'] and \
-                        edgeTuple.edge['arguments']['add type'] == 'replace':
+        if getValue(edgeTuple.edge, 'arguments.voice') =='yes' and \
+             getValue(edgeTuple.edge, 'arguments.add type') == 'replace':
             return 'yes'
     return 'no'
 

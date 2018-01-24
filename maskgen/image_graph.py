@@ -9,12 +9,10 @@ import tarfile
 from tool_set import *
 from time import gmtime, strftime, strptime
 import logging
-import maskgen
-
+from maskgen import __version__
 from threading import RLock
 
-igversion = maskgen.__version__
-
+igversion = __version__
 
 def current_version():
     return igversion
@@ -485,8 +483,8 @@ class ImageGraph:
             if returnNoneOnMissing and not os.path.exists(fullpath):
                 return None, None
             im = self.openImage(fullpath, mask=True)
-            return im, value
-        return None, None
+            return im
+        return None
 
     def getNodeFileType(self, nodeid):
         node = self.get_node(nodeid)

@@ -302,6 +302,7 @@ def openImageFile(filename, isMask=False, args=None):
                 return wrapper
 
     wrap = openFromRegistry(filename, isMask=isMask, args=args)
+    wrap.filename = filename
     with image_lock:
         image_cache[filename] = (wrap, current_time)
     return wrap
@@ -344,12 +345,13 @@ def get_mode(image_array):
         return 'RGB'
 
 
+
 class ImageWrapper:
     """
     @type image_array: numpy.array
     """
 
-    def __init__(self, image_array, mode=None, to_mask=False, info=None):
+    def __init__(self, image_array, mode=None, to_mask=False, info=None,filename=None):
         if str(type(image_array)) == 'ImageWrapper':
             self.image_array = image_array.image_array
         else:
@@ -357,9 +359,10 @@ class ImageWrapper:
         self.info = info
         self.mode = mode if mode is not None else get_mode(image_array)
         self.size = (image_array.shape[1], image_array.shape[0])
+        self.filename = filename
         if to_mask and self.mode != 'L':
-            self.image_array = cv2.cvtColor(self.to_rgb(type='uint8').image_array, cv2.COLOR_RGBA2GRAY)
-            self.mode = 'L'
+            self.image_array = self.to_mask_array()
+            self.mode='L'
 
     def has_alpha(self):
         return len(self.image_array.shape) == 3 and self.mode.find('A') > 0
@@ -417,6 +420,7 @@ class ImageWrapper:
             self.image_array = img_array.astype('uint8')
 
     def save(self, filename, **kwargs):
+        self.filename = filename
         if 'format' in kwargs:
             format = kwargs['format']
         elif getFromWriterRegistry(self.mode.lower()):
@@ -525,7 +529,8 @@ class ImageWrapper:
             return ImageWrapper(img_array)
         return mask
 
-    def to_mask(self):
+
+    def to_mask_array(self):
         """
         white = selected, black = unselected
         @rtype : ImageWrapper
@@ -538,7 +543,14 @@ class ImageWrapper:
         else:
             gray_image = np.ones(gray_image_temp.image_array.shape).astype('uint8') * 255
             gray_image[gray_image_temp.image_array == 0] = 0
-        return ImageWrapper(gray_image)
+        return gray_image
+
+    def to_mask(self):
+        """
+        white = selected, black = unselected
+        @rtype : ImageWrapper
+        """
+        return ImageWrapper(self.to_mask_array())
 
     def to_16BitGray(self, equalize_colors=False):
         """

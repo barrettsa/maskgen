@@ -1,4 +1,3 @@
-import maskgen.exif
 import maskgen.video_tools
 import logging
 
@@ -36,6 +35,8 @@ def get_rotation_filter(difference):
 
 
 def save_as_video(source, target, donor, matchcolor=False, apply_rotate = True):
+    import maskgen.exif
+    import maskgen.video_tools
     """
     Saves image file using quantization tables
     :param source: string filename of source image
@@ -65,13 +66,16 @@ def save_as_video(source, target, donor, matchcolor=False, apply_rotate = True):
     for streamid in range(len(donor_data)):
         data = donor_data[streamid]
         if data['codec_type'] == 'video':
+            if data['nb_frames'] in ['unknown','N/A']:
+                ffargs.extend(['-vsync', '2'])
+                data['r_frame_rate'] = 'N/A'
             for option, setting in video_settings.iteritems():
                 if setting == 'profile' and setting in data:
                     for tup in profile_map:
                         if data[setting].find(tup[0]) >= 0:
                             ffargs.extend([option, tup[1]])
                             break
-                elif setting in data and data[setting] != 'unknown':
+                elif setting in data and data[setting] not in  ['unknown','N/A']:
                     ffargs.extend([option, data[setting]])
 
             try:
@@ -149,15 +153,15 @@ def save_as_video(source, target, donor, matchcolor=False, apply_rotate = True):
 
     ffargs.extend(['-map_metadata', '0:g','-y', target])
 
-    maskgen.video_tools.runffmpeg(ffargs)
     logging.getLogger('masken').info(str(ffargs))
+    maskgen.video_tools.runffmpeg(ffargs)
 
     maskgen.exif.runexif(['-overwrite_original', '-q', '-all=', target], ignoreError=True)
-    maskgen.exif.runexif(['-P', '-q', '-m', '-TagsFromFile', donor, '-all:all', '-unsafe', target], ignoreError=True)
-    maskgen.exif.runexif(['-P', '-q', '-m', '-XMPToolkit=', target], ignoreError=True)
+    maskgen.exif.runexif(['-P', '-q', '-m', '-tagsFromFile', donor,  target], ignoreError=True)
+    maskgen.exif.runexif(['-overwrite_original','-P', '-q', '-m', '-XMPToolkit=', target], ignoreError=True)
     createtime = maskgen.exif.getexif(target, args=['-args', '-System:FileCreateDate'], separator='=')
     if '-FileCreateDate' in createtime:
-        maskgen.exif.runexif(['-P', '-q', '-m', '-System:fileModifyDate=' + createtime['-FileCreateDate'], target],
+        maskgen.exif.runexif(['-overwrite_original', '-P', '-q', '-m', '-System:fileModifyDate=' + createtime['-FileCreateDate'], target],
                              ignoreError=True)
     return {'rotate': rotated, 'rotation':diff_rotation}
 
