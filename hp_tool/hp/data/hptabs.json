@@ -39,7 +39,8 @@
     "HP-StrongReflection",
     "HP-TransparentReflection",
     "HP-ReflectedObject",
-    "HP-Shadows"
+    "HP-Shadows",
+	"HP-MultipleLightSources"
   ],
   "Location": [
     "ImageFilename",
@@ -56,7 +57,7 @@
     "HP-HDR",
     "HP-App"
   ],
-  "Mandatory Image Fields":[
+  "Image Fields":[
     "ImageFilename",
     "HP-OnboardFilter",
     "HP-HDR",
@@ -64,16 +65,17 @@
     "HP-Outside",
     "HP-PrimarySecondary"
   ],
-  "Mandatory Video Fields": [
+  "Video Fields": [
     "ImageFilename",
     "HP-OnboardFilter",
     "HP-HDR",
     "HP-CameraKinematics",
     "HP-Inside",
     "HP-Outside",
-    "HP-PrimarySecondary"
+    "HP-PrimarySecondary",
+    "HP-ReleaseForms"
   ],
-  "Mandatory Audio Fields": [
+  "Audio Fields": [
     "ImageFilename",
     "HP-NumberOfSpeakers",
     "HP-Inside",
@@ -87,5 +89,12 @@
     "HP-Modifier",
     "HP-AngleofRecording",
     "HP-MicLocation"
+  ],
+  "3D Model Fields": [
+    "ImageFilename",
+    "HP-Thumbnails",
+    "HP-Keywords",
+    "HP-PolyCount",
+    "HP-License"
   ]
 }

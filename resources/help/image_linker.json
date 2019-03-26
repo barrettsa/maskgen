@@ -1,0 +1,907 @@
+{
+    "project": {
+        "username": {
+            "images": []
+        },
+        "projectdescription": {
+            "images": []
+        },
+        "validationdate": {
+            "images": []
+        },
+        "creator": {
+            "images": []
+        },
+        "provenance": {
+            "images": []
+        },
+        "validatedby": {
+            "images": []
+        },
+        "qacomment": {
+            "images": []
+        },
+        "organization": {
+            "images": []
+        },
+        "validation": {
+            "images": []
+        },
+        "technicalsummary": {
+            "images": []
+        }
+    },
+    "semanticgroup": {
+        "Location Change": {
+            "images": [
+                "semanticSlides/location_change.png"
+            ]
+        },
+        "Aging": {
+            "images": [
+                "semanticSlides/aging.png"
+            ]
+        },
+        "Dialog Change": {
+            "images": [
+                "semanticSlides/dialog_change.png"
+            ]
+        },
+        "Disaster": {
+            "images": [
+                "semanticSlides/disaster.png"
+            ]
+        },
+        "Face Manipulations": {
+            "images": [
+                "semanticSlides/face_manipulations.png"
+            ]
+        },
+        "Wound": {
+            "images": [
+                "semanticSlides/wound.png"
+            ]
+        },
+        "Timeofday": {
+            "images": [
+                "semanticSlides/timeofday.png"
+            ]
+        },
+        "Date and Time": {
+            "images": [
+                "semanticSlides/dateandtime.png"
+            ]
+        },
+        "Tattoos": {
+            "images": [
+                "semanticSlides/tattoos.png"
+            ]
+        },
+        "Crowd Relocation": {
+            "images": [
+                "semanticSlides/crowd_relocation.png"
+            ]
+        },
+        "Weather Changes": {
+            "images": [
+                "semanticSlides/weather_changes.png"
+            ]
+        },
+        "Cadaver": {
+            "images": [
+                "semanticSlides/cadaver.png"
+            ]
+        },
+        "Ambience Audio Swap": {
+            "images": [
+                "semanticSlides/ambience_audio_swap.png"
+            ]
+        },
+        "Personal Appearance": {
+            "images": [
+                "semanticSlides/personal_appearance.png"
+            ]
+        },
+        "Mood Change": {
+            "images": [
+                "semanticSlides/mood_change.png"
+            ]
+        },
+        "Reflection Manipulations": {
+            "images": [
+                "semanticSlides/reflection_manipulations.png"
+            ]
+        },
+        "Building Relocation": {
+            "images": [
+                "semanticSlides/building_relocation.png"
+            ]
+        },
+        "ENF": {
+            "images": [
+                "semanticSlides/enf.png"
+            ]
+        },
+        "AntiForensic Illumination": {
+            "images": [
+                "semanticSlides/antiforensic_illumination.png"
+			],
+			"url":[
+                "http://www.cosy.sbg.ac.at/~uhl/mmsec/acm05.pdf"
+			]
+        },
+        "Data Embedding Watermark": {
+            "images": [
+                "semanticSlides/data_embedding_watermark.png"
+            ]
+        },
+        "Manhattan World": {
+            "images": [
+                "semanticSlides/manhattan_world.png"
+            ]
+        },
+        "Building Destruction": {
+            "images": [
+                "semanticSlides/building_destruction.png"
+            ]
+        },
+        "Shadow Manipulations": {
+            "images": [
+                "semanticSlides/shadow_manipulations.png"
+            ]
+        },
+        "Data Embedding Steganography": {
+            "images": [
+				"semanticSlides/data_embedding_stego.png"
+			]
+        },
+        "Voice Audio Swap": {
+            "images": [
+                "semanticSlides/voice_audio_swap.png"
+            ]
+        },
+        "Date Burn-in": {
+            "images": [
+                "semanticSlides/dateburnin.png"
+            ]
+        },
+		"Falsifying Documents": {
+			"images": [
+				"semanticSlides/falsifying_documents.png"
+			]
+		},
+		"Drone Video Tests": {
+			"images": [
+				"semanticSlides/drone_test_video.png"
+			]
+		},
+		"splice/copy": {
+			"images": [
+				"semanticSlides/splice.png"
+			]
+		},
+		"Frame From Video": {
+			"images": [
+				"semanticSlides/frame_from_video.png"
+			]
+		}
+    },
+    "operation": {
+		"AudioCopyAdd": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AudioSample": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"DeleteAudioSample": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AddAudioSample": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AudioEffect": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AudioFilter": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AudioAmplify": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AudioReverb": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"AudioCompress": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"ReplaceAudioSample": {
+			"images": [
+				"operationSlides/audio.png"
+			]
+		},
+		"CameraMovement": {
+			"images": [
+				"operationSlides/video_additional_effects.png"
+			]
+		},
+		"Fading": {
+			"images": [
+				"operationSlides/video_additional_effects.png"
+			]
+		},
+		"Mosaic": {
+			"images": [
+				"operationSlides/mosaic2.png",
+				"operationSlides/mosaic.png"
+			]
+		},
+		"ReduceInterlaceFlicker": {
+			"images": [
+				"operationSlides/video_additional_effects.png"
+			]
+		},
+		"AddNoise": {
+			"images": [
+				"operationSlides/add_noise.png",
+				"operationSlides/add_noise2.png"
+			]
+		},
+		"Blur": {
+			"images": [
+				"operationSlides/blur.png",
+				"operationSlides/blur2.png",
+				"operationSlides/blur3.png"
+			]
+		},
+		"WarpStabilize": {
+			"images": [
+				"operationSlides/video_additional_effects.png"
+			]
+		},
+		"Sharpening": {
+			"images": [
+				"operationSlides/sharpening.png",
+				"operationSlides/sharpening2.png"
+			]
+		},
+		"AddTransitions": {
+			"images": [
+				"operationSlides/video_additional_effects.png"
+			]
+		},
+		"AntiForensicCopyExif": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AddCameraModel": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AntiForensicEditExif": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AntiForensicJPGCompression": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AntiForensicDither": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AntiForensicExifQuantizationTable": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"CFACorrection": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"LensDistortion": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AddCamFingerprintPRNU": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"RemoveCamFingerprintPRNU": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AddCamFingerprintAveragePRNUFromSet": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"RemoveCamFingerprintAveragePRNUFromSet": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"ErasureByGAN": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"AberrationCorrection": {
+			"images": [
+				"operationSlides/antiforensic.png"
+			]
+		},
+		"ArtificialLighting": {
+			"images": [
+				"operationSlides/artificial_lighting.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"ArtificialReflection": {
+			"images": [
+				"operationSlides/artificial_reflection.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"ArtificialShadow": {
+			"images": [
+				"operationSlides/artificial_shadow.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"ObjectCGI": {
+			"images": [
+				"operationSlides/object_cgi.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"LayerOpacity": {
+			"images": [
+				"operationSlides/opacity_fill.png",
+				"operationSlides/layer.png",
+				"operationSlides/layer2.png"
+			]
+		},
+		"LayerFill": {
+			"images": [
+				"operationSlides/opacity_fill.png",
+				"operationSlides/layer.png",
+				"operationSlides/layer2.png"
+			]
+		},
+		"Blend": {
+			"images": [
+				"operationSlides/layer.png",
+				"operationSlides/layer2.png"
+			]
+		},
+		"SocialMedia": {
+			"images": [
+				"operationSlides/laundering.png"
+			]
+		},
+		"ColorBalance": {
+			"images": [
+				"operationSlides/color_balance.png",
+				"operationSlides/color.png"
+			]
+		},
+		"ColorLUT": {
+			"images": [
+				"operationSlides/color_lut.png",
+				"operationSlides/color.png"
+			]
+		},
+		"CGIFill": {
+			"images": [
+				"operationSlides/CGI_fill.png",
+				"operationSlides/cgi_fill2.png",
+				"operationSlides/cgi.png"
+			]
+		},
+		"SynthesizeGAN": {
+			"images": [
+				"operationSlides/synthesizeGAN.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"SynthesizeVideo": {
+			"images": [
+				"operationSlides/synthesize_video.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"Hue": {
+			"images": [
+				"operationSlides/hue.png",
+				"operationSlides/hue2.png",
+				"operationSlides/color.png",
+				"operationSlides/color2.png"
+			]
+		},
+		"Saturation": {
+			"images": [
+				"operationSlides/saturation.png",
+				"operationSlides/saturation2.png",
+				"operationSlides/color.png",
+				"operationSlides/color2.png"
+			]
+		},
+		"Vibrance": {
+			"images": [
+				"operationSlides/vibrance.png",
+				"operationSlides/vibrance2.png",
+				"operationSlides/color.png",
+				"operationSlides/color2.png"
+			]
+		},
+		"CreativeFilter": {
+			"images": [
+				"operationSlides/creative_filter.png",
+				"operationSlides/creative_filter2.png"
+			]
+		},
+		"ContentAwareFill": {
+			"images": [
+				"operationSlides/content_aware_fill.png",
+				"operationSlides/content_aware_fill2.png"
+			]
+		},
+		"GANFill": {
+			"images": [
+				"operationSlides/GAN_fill.png"
+			]
+		},
+		"Gradient": {
+			"images": [
+				"operationSlides/gradient.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png",
+				"operationSlides/cgi3.png"
+			]
+		},
+		"PasteSampled": {
+			"images": [
+				"operationSlides/paste_sampled.png",
+				"operationSlides/paste_sampled_clone.png",
+				"operationSlides/paste_sampled_secondary_workflow.png"
+			]
+		},
+		"FilterConvolutionKernel": {
+			"images": [
+				"operationSlides/filter_convolution_kernal.png"
+			]
+		},
+		"MotionBlur": {
+			"images": [
+				"operationSlides/blur.png"
+			]
+		},
+		"FilterKeying": {
+			"images": [
+				"operationSlides/filter2.png"
+			]
+		},
+		"Normalization": {
+			"images": [
+				"operationSlides/normalization.png"
+			]
+		},
+		"Contrast": {
+			"images": [
+				"operationSlides/contrast.png"
+			]
+		},
+		"Curves": {
+			"images": [
+				"operationSlides/curves.png",
+				"operationSlides/levels_curves.png",
+				"operationSlides/levels_curves_color.png"
+			]
+		},
+		"Exposure": {
+			"images": [
+				"operationSlides/exposure.png",
+				"operationSlides/exposure2.png"
+			]
+		},
+		"Levels": {
+			"images": [
+				"operationSlides/levels.png",
+				"operationSlides/levels_curves.png",
+				"operationSlides/levels_curves_color.png"
+			]
+		},
+		"Luminosity": {
+			"images": [
+				"operationSlides/luminosity.png"
+			]
+		},
+		"DigitalPenDraw": {
+			"images": [
+				"operationSlides/digital_pen_draw.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"Handwriting": {
+			"images": [
+				"operationSlides/handwriting.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"OverlayObject": {
+			"images": [
+				"operationSlides/overlay_object.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"OverlayText": {
+			"images": [
+				"operationSlides/overlay_text.png",
+				"operationSlides/cgi.png",
+				"operationSlides/cgi2.png"
+			]
+		},
+		"OutputCopy": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+
+			]
+		},
+		"OutputBmp": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputAudioPCM": {
+			"images": [
+				"operationSlides/output.png"
+			]
+		},
+		"OutputAudioCompressed": {
+			"images": [
+				"operationSlides/output.png"
+			]
+		},
+		"OutputDng": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputJpg": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputJp2": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputNITF": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputPng": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputPDF": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputTif": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_image.png"
+			]
+		},
+		"OutputXVID": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_video.png"
+			]
+		},
+		"OutputMOV": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_video.png"
+			]
+		},
+		"OutputMP4": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_video.png"
+			]
+		},
+		"OutputM4": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_video.png"
+			]
+		},
+		"OutputAVI": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_video.png"
+			]
+		},
+		"OutputNEIF": {
+			"images": [
+				"operationSlides/output.png",
+				"operationSlides/output_video.png"
+			]
+		},
+		"PasteSplice": {
+			"images": [
+				"operationSlides/paste_splice.png",
+				"operationSlides/paste_splice_blend_workflow_donor_image.png",
+				"operationSlides/paste_splice_clone.png",
+				"operationSlides/paste_splice_sampled_summary.png",
+				"operationSlides/video_pastes.png",
+				"operationSlides/workflow_overview.png"
+			]
+		},
+		"PasteFrames": {
+			"images": [
+				"operationSlides/video_pastes.png"
+			]
+		},
+		"PasteOverlay": {
+			"images": [
+				"operationSlides/video_pastes.png"
+			]
+		},
+		"PasteImageSpliceToFrames": {
+			"images" : [
+				"operationSlides/video_pastes.png"
+			]
+		},
+		"CopyPaste": {
+			"images": [
+				"operationSlides/video_pastes.png"
+			]
+		},
+		"CutPaste": {
+			"images": [
+				"operationSlides/video_pastes.png"
+			]
+		},
+		"PostProcessingSizeUpDownOrgExif": {
+			"images": [
+				"operationSlides/post_processing.png"
+			]
+		},
+		"Recapture": {
+			"images": [
+				"operationSlides/post_processing.png",
+				"operationSlides/recapture_types.png",
+				"operationSlides/recapture_considerations.png",
+				"operationSlides/recapture_journal_data.png",
+				"operationSlides/recapture_manipulations.png",
+				"operationSlides/recapture_no_journal_data.png",
+				"operationSlides/recapture_tips.png"
+			]
+		},
+		"SelectRegion": {
+			"images": [
+				"operationSlides/select.png",
+				"operationSlides/select_region.png"
+			]
+		},
+		"SelectRegionFromFrames": {
+			"images": [
+				"operationSlides/select.png"
+			]
+		},
+		"SelectCutFrames": {
+			"images": [
+				"operationSlides/select.png"
+			]
+		},
+		"DuplicateFrameDrop": {
+			"images": [
+				"operationSlides/post_processing.png"
+			]
+		},
+		"SelectCropFrames": {
+			"images": [
+				"operationSlides/select.png"
+			]
+		},
+		"SelectRemove": {
+			"images": [
+				"operationSlides/select_remove.png",
+				"operationSlides/select.png"
+			]
+		},
+		"SelectImageFromFrame": {
+			"images": [
+				"operationSlides/select.png"
+			]
+		},
+		"OutputMosaic": {
+			"images": [
+				"operationSlides/output_video.png",
+				"operationSlides/output.png"
+			]
+		},
+		"TimeAlterationEcho": {
+			"images": [
+				"operationSlides/time_alteration.png"
+			]
+		},
+		"TimeAlterationFrameRate": {
+			"images": [
+				"operationSlides/time_alteration.png"
+			]
+		},
+		"TimeAlterationDifferenceEffect": {
+			"images": [
+				"operationSlides/time_alteration.png"
+			]
+		},
+		"TimeAlterationDisplacementEffect": {
+			"images": [
+				"operationSlides/time_alteration.png"
+			]
+		},
+		"TimeAlterationWarp": {
+			"images": [
+				"operationSlides/time_alteration.png"
+			]
+		},
+		"ImageInterpolation": {
+			"images": [
+				"operationSlides/interpolation.png",
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformAffine": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformCrop": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformCropResize": {
+			"images": [
+				"operationsSlides/transform.png"
+			]
+		},
+		"EncodeMessage": {
+			"images": [
+				"operationSlides/stego.png"
+			]
+		},
+		"TransformDistort": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformFlip": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformMove": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformResize": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformRotate": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformSampleRate": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformScale": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformSeamCarving": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformShear": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformSkew": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformWarp": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformDownSample": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"TransformReverse": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		},
+		"DeepFakeFaceSwap": {
+			"images": [
+				"operationSlides/cgi3.png"
+			]
+		},
+		"MediaStacking": {
+			"images": [
+				"operationSlides/layer.png"
+			]
+		},
+		"FrameBlend": {
+			"images": [
+				"operationSlides/transform.png"
+			]
+		}
+    }
+}

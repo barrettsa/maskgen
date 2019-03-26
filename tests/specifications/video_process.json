@@ -1,0 +1,355 @@
+{
+  "directed": true,
+  "graph": {
+    "username": "alice",
+    "name": "video_flow",
+    "organization": "NIST",
+    "projectdescription" : "Optical Flow, Remove PRNU, Change Date and Time for ENF Checking",
+    "technicalsummary" : "Automated",
+    "semanticrestaging" : "no",
+    "semanticrepurposing" : "no",
+    "semanticrefabrication" : "no",
+    "manipulationcategory":"2-Unit",
+    "recompress": false
+  },
+  "nodes": [
+    {
+      "op_type": "BaseSelection",
+      "image_directory": "{image_dir}",
+      "picklist": "videoset",
+      "id": "0"
+    },
+    {
+      "op_type": "PluginOperation",
+      "plugin": "OutputX264",
+      "id": "1",
+      "arguments": {
+      }
+    },
+     {
+      "op_type": "PluginOperation",
+      "plugin": "FlowDrivenVideoFrameDrop",
+      "id": "2",
+      "arguments": {
+        "seconds to drop": {
+         "type":"int[2:4]"
+        },
+        "Start Time": {
+          "type":"value",
+          "value":0
+        },
+        "save histograms": {
+          "type" : "value",
+          "value":"no"
+        },
+        "codec" : {
+          "type":"value",
+          "value":"0"
+        }
+      }
+    },
+     {
+      "op_type": "PluginOperation",
+      "plugin": "VideoCopyPasteFrames",
+      "id": "3",
+      "arguments": {
+         "Number of Frames": {
+           "type":"variable",
+           "source": "2",
+           "name":"Frames Dropped",
+           "function": "maskgen.tool_set.addTwo"
+        },
+        "Select Start Time": {
+          "type":"variable",
+          "source":"2",
+          "name":"Start Time",
+          "function": "maskgen.tool_set.subtractOneFrame"
+        },
+        "Dest Paste Time": {
+          "type":"variable",
+          "source":"2",
+          "name":"Start Time",
+          "function": "maskgen.tool_set.subtractOneFrame"
+        },
+        "codec" : {
+          "type":"value",
+          "value":"0"
+        }
+      }
+    },
+    {
+      "op_type": "PluginOperation",
+         "plugin": "FlowDrivenVideoTimeWarp",
+      "id": "4",
+      "arguments": {
+        "Frames to Add": {
+          "type":"variable",
+          "source":"2",
+          "name":"Frames to Add"
+        },
+       "Start Time": {
+          "type":"variable",
+          "source":"3",
+          "name":"End Time",
+          "function": "maskgen.tool_set.addOneFrame"
+        },
+        "End Time": {
+          "type":"variable",
+          "source":"3",
+          "name":"End Time",
+          "function": "maskgen.tool_set.addOneFrame"
+        },
+        "Direction": {
+          "type" : "value",
+          "value":"forward"
+        },
+        "codec" : {
+          "type":"value",
+          "value":"0"
+        }
+      }
+    },
+     {
+      "op_type": "PluginOperation",
+      "plugin": "CompressAsVideo",
+      "id": "5",
+      "arguments": {
+         "donor": {
+           "type": "donor",
+           "source": "0"
+         }
+      }
+    },
+    {
+      "op_type": "PluginOperation",
+      "plugin": "FlowDrivenVideoTimeWarp",
+      "id": "6",
+      "arguments": {
+        "Start Time": {
+          "type": "variable",
+          "source": "2",
+          "name": "Start Time"
+        },
+        "Frames to Add": {
+          "type": "variable",
+          "source": "2",
+          "name": "Frames to Add"
+        },
+         "codec" : {
+          "type":"value",
+          "value":"0"
+        }
+      }
+    },
+    {
+      "op_type": "PluginOperation",
+      "plugin": "PRNURemoveFromVid",
+      "id": "7"
+     },
+    {
+      "op_type": "PluginOperation",
+      "plugin": "CompressAsVideo",
+      "id": "8",
+      "arguments": {
+         "donor": {
+           "type": "donor",
+           "source": "0"
+         }
+      }
+     },
+    {
+      "op_type": "PluginOperation",
+      "plugin": "CompressAsVideo",
+      "id": "9",
+      "arguments": {
+         "donor": {
+           "type": "donor",
+           "source": "0"
+         }
+      }
+     },
+     {
+      "op_type": "PluginOperation",
+      "plugin": "CompressAsVideo",
+      "id": "10",
+      "arguments": {
+         "donor": {
+           "type": "donor",
+           "source": "0"
+         }
+      }
+      },
+      {
+      "op_type": "PluginOperation",
+      "plugin": "CompressAsVideo",
+      "id": "11",
+      "arguments": {
+         "donor": {
+           "type": "donor",
+           "source": "0"
+         }
+      },
+      {
+        "op_type": "PluginOperation",
+        "plugin": "ExifDateTime",
+        "id": "12",
+        "arguments": {
+          "Time Minimum": {
+            "type": "value",
+            "value": "00:00:00"
+          },
+          "Time Maximum": {
+            "type": "value",
+            "value": "23:59:59"
+          },
+          "Date Minimum": {
+            "type": "value",
+            "value": "01-01-2000"
+          },
+          "Date Maximum": {
+            "type" : "value",
+            "value": "02-26-2018"
+          }
+        }
+      },
+      {
+        "op_type": "PluginOperation",
+        "plugin": "ExifDateTime",
+        "id": "13",
+
+        "arguments": {
+          "Time Minimum": {
+            "type": "value",
+            "value": "00:00:00"
+          },
+          "Time Maximum": {
+            "type": "value",
+            "value": "23:59:59"
+          },
+          "Date Minimum": {
+            "type": "value",
+            "value": "01-01-2000"
+          },
+          "Date Maximum": {
+            "type" : "value",
+            "value": "02-26-2018"
+          }
+        }
+      },
+      {
+        "op_type": "PluginOperation",
+        "plugin": "ExifDateTime",
+        "id": "14",
+        "arguments": {
+          "Time Minimum": {
+            "type": "value",
+            "value": "00:00:00"
+          },
+          "Time Maximum": {
+            "type": "value",
+            "value": "23:59:59"
+          },
+          "Date Minimum": {
+            "type": "value",
+            "value": "01-01-2000"
+          },
+          "Date Maximum": {
+            "type" : "value",
+            "value": "02-26-2018"
+          }
+        }
+      },
+      {
+        "op_type": "PluginOperation",
+        "plugin": "ExifDateTime",
+        "id": "15",
+        "arguments": {
+          "Time Minimum": {
+            "type": "value",
+            "value": "00:00:00"
+          },
+          "Time Maximum": {
+            "type": "value",
+            "value": "23:59:59"
+          },
+          "Date Minimum": {
+            "type": "value",
+            "value": "01-01-2000"
+          },
+          "Date Maximum": {
+            "type" : "value",
+            "value": "02-26-2018"
+          }
+        }
+      }
+    }
+  ],
+  "links": [
+    {
+      "source": 0,
+      "target": 1
+    },
+    {
+      "source": 1,
+      "target": 2
+    },
+    {
+      "source": 1,
+      "target": 3
+    },
+    {
+       "source": 2,
+       "target": 3,
+       "connect":false
+    },
+    {
+      "source": 3,
+      "target": 4
+    },
+      {
+      "source": 4,
+      "target": 5
+    },
+      {
+      "source": 2,
+      "target": 6
+    },
+    {
+      "source": 6,
+      "target": 7
+     },
+      {
+      "source": 2,
+      "target": 8
+    },
+    {
+      "source": 3,
+      "target": 9
+     },
+     {
+      "source": 7,
+      "target": 10
+     },
+     {
+      "source": 6,
+      "target": 11
+     },
+    {
+      "source": 8,
+      "target": 12
+    },
+    {
+      "source": 9,
+      "target": 13
+    },
+    {
+      "source": 10,
+      "target": 14
+    },
+    {
+      "source": 11,
+      "target": 15
+    }
+  ],
+  "multigraph": false
+}

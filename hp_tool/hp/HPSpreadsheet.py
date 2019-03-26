@@ -1,10 +1,13 @@
 import json
+import subprocess
 import tarfile
 import ttk
 from Tkinter import *
 import tkFileDialog
 import os
 import sys
+from operator import add
+
 import boto3
 from boto3.s3.transfer import S3Transfer
 import collections
@@ -19,11 +22,12 @@ import tempfile
 import shutil
 from PIL import Image, ImageTk
 from ErrorWindow import ErrorWindow
-from CameraForm import HP_Device_Form
 import hp_data
 import datetime
 import threading
 import data_files
+from camera_handler import ValidResolutions, API_Camera_Handler
+from FormHandler import FormSelector
 
 RVERSION = hp_data.RVERSION
 
@@ -40,13 +44,19 @@ class HPSpreadsheet(Toplevel):
             self.imageDir = os.path.join(self.dir, 'image')
             self.videoDir = os.path.join(self.dir, 'video')
             self.audioDir = os.path.join(self.dir, 'audio')
+            self.modelDir = os.path.join(self.dir, 'model')
+            self.thumbnailDir = os.path.join(self.dir, 'thumbnails')
             self.csvDir = os.path.join(self.dir, 'csv')
+            self.formDir = os.path.join(self.dir, "release_forms")
+            self.release_forms = os.listdir(self.formDir) if os.path.isdir(self.formDir) else []
         self.master = master
         self.ritCSV=ritCSV
         self.trello_key = data_files._TRELLO['app_key']
         self.saveState = True
         self.highlighted_cells = []
         self.error_cells = []
+        self.temps_created = False
+        self.device_type = None
         self.create_widgets()
         self.kinematics = self.load_kinematics()
         self.collections = sorted(hp_data.load_json_dictionary(data_files._COLLECTIONS).keys())
@@ -73,8 +83,10 @@ class HPSpreadsheet(Toplevel):
         self.nb.pack(fill=BOTH, expand=1)
         self.nbtabs = {'main': ttk.Frame(self.nb)}
         self.nb.add(self.nbtabs['main'], text='All Items')
-        self.pt = CustomTable(self.nbtabs['main'], scrollregion=None, width=1024, height=720)
+        self.pt = CustomTable(self.nbtabs['main'], scrollregion=None, width=1024, height=720,
+                              color_cb=self.color_code_cells)
         self.pt.show()
+        self.pt.bind_columns()
         self.on_main_tab = True
         self.add_tabs()
         self.nb.bind('<<NotebookTabChanged>>', self.switch_tabs)
@@ -111,6 +123,9 @@ class HPSpreadsheet(Toplevel):
         self.fileMenu.add_command(label='Save', command=self.exportCSV, accelerator='ctrl-s')
         self.fileMenu.add_command(label='Validate', command=self.validate)
         self.fileMenu.add_command(label='Export to S3', command=self.s3export)
+        self.fileMenu.add_command(label='Organize Columns', command=self.sort_columns)
+        self.fileMenu.add_command(label="Edit Release Forms", command=lambda: FormSelector(self.formDir,
+                                  self.release_forms, self.get_current_tab(), self))
 
         self.editMenu = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label='Edit', menu=self.editMenu)
@@ -138,17 +153,21 @@ class HPSpreadsheet(Toplevel):
         self.bind('<Control-z>', self.undo)
         self.bind('<Control-y>', self.redo)
 
+    def get_current_tab(self):
+        if self.on_main_tab:
+            currentTable = self.pt
+        else:
+            currentTable = self.tabpt
+        return currentTable
+
     def undo(self, event=None):
         """
         Will undo the most recent fill action. Does not undo regular single text entry.
         :param event: event trigger
         :return: None
         """
-        if self.on_main_tab:
-            currentTable = self.pt
-        else:
-            currentTable = self.tabpt
-        if hasattr(currentTable, 'undo') and currentTable.undo:
+        currentTable = self.get_current_tab()
+        if hasattr(currentTable, 'undo') and currentTable.undo and isinstance(currentTable.undo, list):
             currentTable.redo = []
             # cell: tuple (value, row, column)
             for cell in currentTable.undo:
@@ -162,11 +181,8 @@ class HPSpreadsheet(Toplevel):
         :param event: event trigger
         :return: None
         """
-        if self.on_main_tab:
-            currentTable = self.pt
-        else:
-            currentTable = self.tabpt
-        if hasattr(currentTable, 'redo') and currentTable.redo:
+        currentTable = self.get_current_tab()
+        if hasattr(currentTable, 'redo') and currentTable.redo and isinstance(currentTable.redo, list):
             currentTable.undo = []
             for cell in currentTable.redo:
                 currentTable.undo.append((currentTable.model.getValueAt(cell[1], cell[2]), cell[1], cell[2]))
@@ -187,10 +203,18 @@ class HPSpreadsheet(Toplevel):
             image = os.path.join(self.videoDir, self.imName)
             if not os.path.exists(image):
                 image = os.path.join(self.audioDir, self.imName)
+                if not os.path.exists(image):
+                    image = os.path.join(self.modelDir, self.imName[:-6], self.imName)
+                    if not os.path.exists(image):
+                        image = os.path.join(self.thumbnailDir, self.imName)
         if sys.platform.startswith('linux'):
             os.system('xdg-open "' + image + '"')
         elif sys.platform.startswith('win'):
-            os.startfile(image)
+            try:
+                os.startfile(image)
+            except WindowsError:
+                print("Image could not be opened")
+
         else:
             os.system('open "' + image + '"')
 
@@ -200,15 +224,24 @@ class HPSpreadsheet(Toplevel):
         :param event: event trigger
         :return: None
         """
-        if self.on_main_tab:
-            row = self.pt.getSelectedRow()
-        else:
-            row = self.tabpt.getSelectedRow()
-        self.imName = str(self.pt.model.getValueAt(row, 0))
-        self.currentImageNameVar.set('Current Image: ' + self.imName)
+        import hp.hp_data
+        row = self.get_current_tab().getSelectedRow()
+        type = self.pt.model.getValueAt(row, 32)
+        current_file = str(self.pt.model.getValueAt(row, self.pt.get_col_by_name("ImageFilename")))
+
+        self.imName = str(self.pt.model.getValueAt(row, 0) if (type == "image" and "." + self.pt.model.getValueAt(row, 13).lower() not in hp_data.exts['nonstandard']) else self.pt.model.getValueAt(row, 61).split(";")[0])
+
+        self.currentImageNameVar.set('Current Image: ' + current_file)
         maxSize = 480
         try:
-            im = Image.open(os.path.join(self.imageDir, self.imName))
+            type_col = self.pt.get_col_by_name("FileType")
+
+            if type == "image":
+                im = Image.open(os.path.join(self.imageDir, self.imName))
+            elif type == "model":
+                im = Image.open(os.path.join(self.modelDir, current_file.split(".")[0], self.imName))
+            else:
+                im = Image.open(os.path.join(self.thumbnailDir, self.imName))
         except (IOError, AttributeError):
             im = Image.open(data_files._REDX)
         if im.size[0] > maxSize or im.size[1] > maxSize:
@@ -242,13 +275,16 @@ class HPSpreadsheet(Toplevel):
         if clickedTab == 'All Items':
             self.update_main()
             self.on_main_tab = True
+            self.pt.bind_columns()
         else:
             self.update_main()
             headers = tabs[clickedTab]
-            self.tabpt = CustomTable(self.nbtabs[clickedTab], scrollregion=None, width=1024, height=720, rows=0, cols=0)
+            self.tabpt = CustomTable(self.nbtabs[clickedTab], scrollregion=None, width=1024, height=720, rows=0, cols=0,
+                                     color_cb=self.color_code_cells)
             for h in headers:
                 self.tabpt.model.df[h] = self.pt.model.df[h]
             self.tabpt.show()
+            self.tabpt.bind_columns(self.tabpt)
             self.tabpt.redraw()
             self.on_main_tab = False
             self.color_code_cells(self.tabpt)
@@ -269,12 +305,8 @@ class HPSpreadsheet(Toplevel):
         Should be refactored when time allows.
         :return: None
         """
-        if self.on_main_tab:
-            col = self.pt.getSelectedColumn()
-            cols = list(self.pt.model.df)
-        else:
-            col = self.tabpt.getSelectedColumn()
-            cols = list(self.tabpt.model.df)
+        col = self.get_current_tab().getSelectedColumn()
+        cols = list(self.get_current_tab().model.df)
         currentCol = cols[col]
         self.currentColumnLabel.config(text='Current column: ' + currentCol)
         if currentCol in self.booleanColNames:
@@ -325,8 +357,9 @@ class HPSpreadsheet(Toplevel):
             validValues = ['dynamic', 'static']
         elif currentCol == 'HP-Collection':
             validValues = self.collections
-
-        elif currentCol in ['ImageWidth', 'ImageHeight', 'BitDepth']:
+        elif currentCol == 'HP-License':
+            validValues = ['CC-0']
+        elif currentCol in ['ImageWidth', 'ImageHeight', 'BitDepth', 'HP-PolyCount']:
             validValues = {'instructions':'Any integer value'}
         elif currentCol in ['GPSLongitude', 'GPSLatitude']:
             validValues = {'instructions':'Coodinates, specified in decimal degree format'}
@@ -338,18 +371,83 @@ class HPSpreadsheet(Toplevel):
             validValues = {'instructions':'Local ID number (PAR, RIT) of lens'}
         elif currentCol == 'HP-NumberOfSpeakers':
             validValues = {'instructions':'Number of people speaking in recording. Do not count background noise.'}
+        elif currentCol == 'HP-ReleaseForms':
+            validValues = {'values': self.release_forms, 'type': 'multiselect'}
 
         else:
             validValues = {'instructions':'Any string of text'}
 
         self.validateBox.delete(0, END)
         if type(validValues) == dict:
-            self.validateBox.insert(END, validValues['instructions'])
+            types = {"multiselect": self.multi_select_insert,
+                     "additionalaction": lambda *args: self.check_additional(currentCol, *args)}
             self.validateBox.unbind('<<ListboxSelect>>')
+            if 'instructions' in validValues:
+                self.validateBox.insert(END, validValues['instructions'])
+            if 'values' in validValues:
+                for v in validValues['values']:
+                    self.validateBox.insert(END, v)
+            if 'type' in validValues:
+                self.validateBox.bind('<<ListboxSelect>>', types[validValues['type']])
         else:
             for v in validValues:
                 self.validateBox.insert(END, v)
             self.validateBox.bind('<<ListboxSelect>>', self.insert_item)
+
+    def multi_select_insert(self, event):
+        selection = event.widget.curselection()
+
+        try:
+            val = event.widget.get(selection[0])
+        except IndexError:
+            return
+
+        if self.on_main_tab:
+            currentTable = self.pt
+        else:
+            currentTable = self.tabpt
+
+        row = currentTable.getSelectedRow()
+        col = currentTable.getSelectedColumn()
+
+        try:
+            if ((row, col) in currentTable.disabled_cells) and not ((row, col) in currentTable.special_cells):
+                return
+        except AttributeError:
+            pass
+
+        current_values = currentTable.model.getValueAt(row, col).split(", ")
+        if "" in current_values:
+            current_values.pop(current_values.index(""))
+
+        if val in current_values:
+            current_values.pop(current_values.index(val))
+        else:
+            current_values.append(val)
+
+        currentTable.undo = [(currentTable.model.getValueAt(row, col), row, col)]
+        currentTable.model.setValueAt(", ".join(sorted(current_values)), row, col)
+        currentTable.redraw()
+
+        if hasattr(currentTable, 'cellentry'):
+            currentTable.cellentry.destroy()
+
+        currentTable.parentframe.focus_set()
+
+
+    def check_additional(self, column_name):
+        if self.on_main_tab:
+            currentTable = self.pt
+        else:
+            currentTable = self.tabpt
+
+        ops = {}
+
+        try:
+            ops[column_name]
+        except KeyError:
+            pass
+        return
 
     def load_device_exif(self, field):
         """
@@ -403,9 +501,10 @@ class HPSpreadsheet(Toplevel):
 
         self.booleanColNums = []
         self.booleanColNames = ['HP-OnboardFilter', 'HP-WeakReflection', 'HP-StrongReflection', 'HP-TransparentReflection',
-                        'HP-ReflectedObject', 'HP-Shadows', 'HP-HDR', 'HP-Inside', 'HP-Outside', 'HP-MultiInput', 'HP-Echo', 'HP-Modifier']
+                        'HP-ReflectedObject', 'HP-Shadows', 'HP-HDR', 'HP-Inside', 'HP-Outside', 'HP-MultiInput', 'HP-Echo', 'HP-Modifier', 'HP-MultipleLightSources']
         for b in self.booleanColNames:
-            self.booleanColNums.append(self.pt.model.df.columns.get_loc(b))
+            if b in self.pt.model.df:
+                self.booleanColNums.append(self.pt.model.df.columns.get_loc(b))
 
         self.mandatoryImage = []
         self.mandatoryImageNames = ['HP-OnboardFilter', 'HP-HDR', 'HP-DeviceLocalID', 'HP-Inside', 'HP-Outside', 'HP-PrimarySecondary']
@@ -424,7 +523,13 @@ class HPSpreadsheet(Toplevel):
         for c in self.mandatoryAudioNames:
             self.mandatoryAudio.append(self.pt.model.df.columns.get_loc(c))
 
-        self.disabledColNames = ['HP-DeviceLocalID', 'HP-CameraModel', 'CameraModel', 'DeviceSN', 'CameraMake']
+        self.mandatoryModels = []
+        self.mandatoryModelNames = ['HP-Keywords', 'HP-PolyCount', 'HP-License']
+        for m in self.mandatoryModelNames:
+            self.mandatoryModels.append(self.pt.model.df. columns.get_loc(m))
+
+        self.disabledColNames = ['HP-DeviceLocalID', 'HP-CameraModel', 'CameraModel', 'DeviceSN', 'CameraMake',
+                                 'HP-Thumbnails', 'HP-Username', 'HP-seed', 'HP-HDLocation']
         self.disabledCols = []
         for d in self.disabledColNames:
             self.disabledCols.append(self.pt.model.df.columns.get_loc(d))
@@ -432,9 +537,17 @@ class HPSpreadsheet(Toplevel):
         #self.mandatory = {'image':self.mandatoryImage, 'video':self.mandatoryVideo, 'audio':self.mandatoryAudio}
 
         self.processErrors = self.check_process_errors()
-        self.color_code_cells()
+        self.exportCSV(False, True)
         self.update_current_image()
         self.master.statusBox.println('Loaded data from ' + self.ritCSV)
+
+    def get_old_name(self, newname):
+        old_col = self.pt.get_col_by_name('OriginalImageName')
+        image_row = self.pt.get_row_by_image_name(newname)
+        if not image_row:
+            return newname
+
+        return self.pt.model.getValueAt(image_row, old_col)
 
     def color_code_cells(self, tab=None):
         """
@@ -442,6 +555,7 @@ class HPSpreadsheet(Toplevel):
         GRAY (#c1c1c1) indicates cell is DISABLED
         YELLOW (#f3f315) indicates cell is MANDATORY
         RED (#ff5b5b) indicates an ERROR in that cell
+        BLUE (#66edff) indicates a special entry (No Manual Entry)
         WHITE (#ffffff) is NORMAL
         :param tab: (optional), specify current tab (self.tabpt)
         :return: None
@@ -452,37 +566,49 @@ class HPSpreadsheet(Toplevel):
         else:
             track_highlights = False
         tab.disabled_cells = []
+        tab.special_cells = []
+
+        local_id = self.pt.model.getValueAt(0, 9)
+
+        if not self.device_type and local_id:
+            cam_handler = API_Camera_Handler(self, self.settings.get_key("apiurl"), self.settings.get_key("apitoken"),
+                                             local_id)
+            self.device_type = cam_handler.get_types()[0] if cam_handler.get_types() else "model"
+
+        props = {"disabled": {"color": "#c1c1c1", "disabled": True},
+                 "mandatory": {"color": "#f3f315", "disabled": False},
+                 "specialentry": {"color": "#66edff", "disabled": True},
+                 "enable": {"color": "#fff", "disabled": False}}
 
         notnans = tab.model.df.notnull()
+        tab.delete("all")
         for row in range(0, tab.rows):
             for col in range(0, tab.cols):
                 colName = list(tab.model.df)[col]
-                currentExt = os.path.splitext(self.pt.model.getValueAt(row, 0))[1].lower()
+                fname = self.pt.model.getValueAt(row, 0)
+                currentExt = os.path.splitext(fname)[1].lower()
                 x1, y1, x2, y2 = tab.getCellCoords(row, col)
-                if notnans.iloc[row, col] and colName != 'HP-Collection':
-                    rect = tab.create_rectangle(x1, y1, x2, y2,
-                                                fill='#c1c1c1',
-                                                outline='#084B8A',
-                                                tag='cellrect')
+
+                celltype = \
+                    "disabled" if (notnans.iloc[row, col] and not colName.startswith("HP")) or (colName in
+                               self.disabledColNames or (colName == "HP-PrimarySecondary" and self.device_type !=
+                               "CellPhone") or (colName == "HP-Keywords" and self.device_type != "model")) else\
+                    "mandatory" if (colName in self.mandatoryImageNames and currentExt in hp_data.exts['IMAGE']) or \
+                              (colName in self.mandatoryVideoNames and ((currentExt in hp_data.exts['VIDEO']) or
+                              fname.lower().endswith(".dng.zip"))) or (colName in self.mandatoryAudioNames and
+                              currentExt in hp_data.exts['AUDIO']) or (colName in self.mandatoryModelNames and
+                              self.pt.model.getValueAt(row, 0).endswith('.3d.zip')) else\
+                    "specialentry" if colName in ["HP-ReleaseForms"] else\
+                    "enable"
+
+                rect = tab.create_rectangle(x1, y1, x2, y2, fill=props[celltype]["color"], outline="#084B8A",
+                                            tag="cellrect")
+
+                if props[celltype]["disabled"]:
                     tab.disabled_cells.append((row, col))
-                if (colName in self.mandatoryImageNames and currentExt in hp_data.exts['IMAGE']) or \
-                        (colName in self.mandatoryVideoNames and currentExt in hp_data.exts['VIDEO']) or \
-                        (colName in self.mandatoryAudioNames and currentExt in hp_data.exts['AUDIO']):
-                    rect = tab.create_rectangle(x1, y1, x2, y2,
-                                                fill='#f3f315',
-                                                outline='#084B8A',
-                                                tag='cellrect')
-                    if track_highlights:
-                        self.highlighted_cells.append((row, col))
-                    if (row, col) in tab.disabled_cells:
-                        tab.disabled_cells.remove((row, col))
-                if colName in self.disabledColNames:
-                    rect = tab.create_rectangle(x1, y1, x2, y2,
-                                                fill='#c1c1c1',
-                                                outline='#084B8A',
-                                                tag='cellrect')
-                    if (row, col) not in tab.disabled_cells:
-                        tab.disabled_cells.append((row, col))
+                if celltype == "specialentry":
+                    tab.special_cells.append((row, col))
+
             image = self.pt.model.df['OriginalImageName'][row]
             if self.processErrors is not None and image in self.processErrors and self.processErrors[image]:
                 for errors in self.processErrors[image]:
@@ -501,6 +627,19 @@ class HPSpreadsheet(Toplevel):
         tab.lift('cellrect')
         tab.redraw()
 
+    def sort_columns(self):
+        if not self.on_main_tab:
+            self.nb.select(self.nbtabs['main'])
+            self.update_main()
+            self.on_main_tab = True
+        with open(data_files._HEADERS, "r") as f:
+            headers = json.load(f)["rit"]
+        valid = [x for x in headers if x in self.pt.model.df]
+        self.pt.model.df = self.pt.model.df[valid]
+        self.pt.redraw()
+        self.color_code_cells()
+        return
+
     def exportCSV(self, showErrors=True, quiet=False):
         """
         Export the spreadsheet to CSV. DOES NOT EXPORT TO S3 (see s3export).
@@ -508,11 +647,7 @@ class HPSpreadsheet(Toplevel):
         :param quiet: boolean, set True to skip message dialog pop-ups
         :return: True if cancelled, None otherwise
         """
-        if not self.on_main_tab:
-            self.nb.select(self.nbtabs['main'])
-            self.update_main()
-            self.on_main_tab = True
-        self.pt.redraw()
+        self.sort_columns()
         self.pt.doExport(self.ritCSV)
         tmp = self.ritCSV + '-tmp.csv'
         with open(self.ritCSV, 'r') as source:
@@ -525,6 +660,7 @@ class HPSpreadsheet(Toplevel):
         shutil.move(tmp, self.ritCSV)
         self.export_rankOne()
         self.saveState = True
+        self.color_code_cells()
         if not quiet and showErrors:
             msg = tkMessageBox.showinfo('Status', 'Saved! The spreadsheet will now be validated.', parent=self)
         if showErrors:
@@ -578,25 +714,68 @@ class HPSpreadsheet(Toplevel):
         if cancelled:
             return
 
-        initial = self.settings.get('aws', notFound='')
+        initial = self.settings.get_key('aws-hp')
         val = tkSimpleDialog.askstring(title='Export to S3', prompt='S3 bucket/folder to upload to.', initialvalue=initial, parent=self)
 
         if (val is not None and len(val) > 0):
-            self.settings.set('aws', val)
+            self.settings.save('aws-hp', val)
             s3 = S3Transfer(boto3.client('s3', 'us-east-1'))
             BUCKET = val.split('/')[0].strip()
             DIR = val[val.find('/') + 1:].strip()
             DIR = DIR if DIR.endswith('/') else DIR + '/'
 
-            print('Archiving data...')
-            archive = self.create_hp_archive()
+            archives_in_dir = [x for x in os.listdir(self.dir) if os.path.splitext(x)[1] == ".tar" and
+                               self.is_hp_archive(x)]
+            encryptions_in_dir = [x for x in os.listdir(self.dir) if os.path.splitext(x)[1] == ".gpg"]
+            # item -1 is going to be the most recent since files are named <name>-<device>-<date><time>.tar
+
+            if not (archives_in_dir or encryptions_in_dir):
+                print('Archiving and encrypting data...'),
+                archive = self.create_hp_archive()
+                print('done.')
+            else:
+                reuse_archive = tkMessageBox.askyesno("Archive Found", "A preexisting archive has been found.  Would"
+                                                                       " you like to reuse it?\n\nWARNING: If you reuse"
+                                                                       " the archive, none of the changes made since "
+                                                                       "the archive was made will be uploaded.",
+                                                      parent=self)
+                if reuse_archive:
+                    if encryptions_in_dir and archives_in_dir:
+                        if tkMessageBox.askyesno("Use Encrypted Archive", "An encrypted archive has been found.  Would "
+                                                                          "you like to use that to skip the encryption "
+                                                                          "process? (Select no to re-encrypt archive)",
+                                                 parent=self):
+                            archive = os.path.join(self.dir, encryptions_in_dir[-1])
+                        else:
+                            for e in encryptions_in_dir:
+                                os.remove(os.path.join(self.dir, e))
+                            print("Encrypting data..."),
+                            archive = self.encrypt(os.path.join(self.dir, archives_in_dir[-1]))
+                            print("done.")
+                    elif encryptions_in_dir:
+                        archive = os.path.join(self.dir, encryptions_in_dir[-1])
+                    else:  # only archive exists
+                        print("Encrypting data..."),
+                        archive = self.encrypt(os.path.join(self.dir, archives_in_dir[-1]))
+                        print("done.")
+
+                else:
+                    print('Archiving and encrypting data...'),
+                    archive = self.create_hp_archive()
+                    print('done.')
 
             print('Uploading...')
             try:
                 s3.upload_file(archive, BUCKET, DIR + os.path.basename(archive), callback=ProgressPercentage(archive))
             except Exception as e:
-                tkMessageBox.showerror(title='Error', message='Could not complete upload.', parent=self)
+                tkMessageBox.showerror(title='Error', message='Could not complete upload.\n\n\n' + str(e), parent=self)
+                print e
                 return
+
+            try:
+                os.remove(archive)
+            except Exception as e:
+                tkMessageBox.showerror(title='Error', message='Could not remove file.\n\n\n' + str(e), parent=self)
 
             #self.verify_upload(all_files, os.path.join(BUCKET, DIR))
             if tkMessageBox.askyesno(title='Complete', message='Successfully uploaded HP data to S3://' + val + '. Would you like to notify via Trello?', parent=self):
@@ -615,13 +794,31 @@ class HPSpreadsheet(Toplevel):
         Prompt for Trello comment, while also checking that trello credential exists
         :return: string, comment to be posted to trello with upload information
         """
-        if self.settings.get('trello', notFound='') == '':
+        if self.settings.get_key('trello') == '':
             token = self.get_trello_token()
             if token == '':
                 return None
-            self.settings.set('trello', token)
+            self.settings.save('trello', token)
         comment = tkSimpleDialog.askstring(title='Trello Notification', prompt='(Optional) Enter any trello comments for this upload.', parent=self)
         return comment
+
+    def is_hp_archive(self, archive):
+        from tarfile import TarFile, ReadError
+        test_file = TarFile(os.path.join(self.dir, archive))
+        # the only directory we can guarantee is parent/csv
+        try:
+            # path must use '/' separator, os.path.join doesn't work
+            test_file.getmember(os.path.basename(self.dir) + "/csv")
+            test_file.close()
+            return True
+        except KeyError:
+            # Didn't exist
+            test_file.close()
+            return False
+        except ReadError:
+            print("WARNING: {0} could not be read, and therefore can not be reused for uploading.".format(archive))
+            return False
+
 
     def notify_trello(self, filestr, archive, comment):
         """
@@ -632,17 +829,17 @@ class HPSpreadsheet(Toplevel):
         :return: status code if error occurs, else None
         """
 
-        if self.settings.get('trello') is None:
+        if self.settings.get_key('trello') is None:
             token = self.get_trello_token()
-            self.settings.set('trello', token)
+            self.settings.save('trello', token)
         else:
-            token = self.settings.get('trello')
+            token = self.settings.get_key('trello')
 
         # list ID for "New Devices" list
         list_id = data_files._TRELLO['hp_list']
 
         # post the new card
-        new = os.path.splitext(os.path.basename(archive))[0]
+        new = os.path.splitext(os.path.splitext(os.path.basename(archive))[0])[0]  # one split for tar, one for gpg
         stats = filestr + '\n' + self.collect_stats() + '\n' + 'User comment: ' + comment
         stats = stats
         resp = requests.post("https://trello.com/1/cards", params=dict(key=self.trello_key, token=token),
@@ -688,27 +885,56 @@ class HPSpreadsheet(Toplevel):
         Archive output folder into a .tar file.
         :return: string, archive filename formatted as "USR-LocalID-YYmmddHHMMSS.tar"
         """
-        val = self.pt.model.df['HP-DeviceLocalID'][0]
+
+        ignore_dirs = ["temp"]
+        val = self.pt.model.df['HP-DeviceLocalID'][0] if type(self.pt.model.df['HP-DeviceLocalID'][0]) is str else ''
         dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S')[2:]
         fd, tname = tempfile.mkstemp(suffix='.tar')
         archive = tarfile.open(tname, "w", errorlevel=2)
-        archive.add(self.dir, arcname=os.path.split(self.dir)[1])
+        for d in os.listdir(self.dir):
+            fp = os.path.join(self.dir, d)
+            if os.path.isdir(fp) and d not in ignore_dirs:
+                archive.add(fp, arcname=os.path.join(os.path.split(self.dir)[1], d))
         archive.close()
         os.close(fd)
-        final_name = os.path.join(self.dir, '-'.join((self.settings.get('username'), val, dt)) + '.tar')
-        shutil.move(tname, os.path.join(self.dir, final_name))
+        final_name = os.path.join(self.dir, '-'.join((self.settings.get_key('username'), val, dt)) + '.tar')
+        tar_path = os.path.join(self.dir, final_name)
+        shutil.move(tname, tar_path)
+        gpg = self.encrypt(tar_path)
+        return gpg
 
-        return final_name
+    def encrypt(self, tar_path):
+        import subprocess
+
+        recipient = self.settings.get_key("archive_recipient") if self.settings.get_key("archive_recipient") else None
+        if recipient:
+            subprocess.Popen(['gpg', '--recipient', recipient, '--trust-model', 'always', '--encrypt', "--yes",
+                              tar_path]).communicate()
+            final_name = tar_path + ".gpg"
+            return final_name
+
+        tkMessageBox.showerror("No Recipient", "The HP Tool cannot upload archives unless they are encrypted to a "
+                                               "recipient.  Enter your recipient in the settings menu.")
+        return None
 
     def validate(self):
         """
         Run validation routines, and re-color code cells after check is complete
         :return: None. Opens ErrorWindow if errors exist.
         """
+        resolutions = []
         errors = []
         types = self.pt.model.df['Type']
         uniqueIDs = []
         self.processErrors = self.check_process_errors()
+
+        w_col = self.pt.get_col_by_name("ImageWidth")
+        h_col = self.pt.get_col_by_name("ImageHeight")
+        ps_col = self.pt.get_col_by_name("HP-PrimarySecondary")
+
+        files_in_dir = []
+        files_in_csv = []
+
         for row in range(0, self.pt.rows):
             for col in range(0, self.pt.cols):
                 currentColName = self.pt.model.df.columns[col]
@@ -726,6 +952,19 @@ class HPSpreadsheet(Toplevel):
                     elif type == 'audio' and col in self.mandatoryAudio:
                         errors.append('Invalid entry at column ' + currentColName + ', row ' + str(
                             row + 1) + '. Value must be True or False')
+                elif currentColName == "HP-PrimarySecondary" and val not in ['primary', 'secondary']:
+                    errors.append('Invalid entry at column HP-PrimarySecondary, row {0}.  Value must be "primary" or'
+                                  ' "secondary".'.format(row + 1))
+            try:
+                width = int(self.pt.model.getValueAt(row, w_col))
+                height = int(self.pt.model.getValueAt(row, h_col))
+            except ValueError:
+                width = height = ""
+            ps = self.pt.model.getValueAt(row, ps_col)
+            res = (width, height)
+            if (res, ps) not in resolutions and res[0] != "" and res[1] != "":
+                resolutions.append((res, ps))
+
             errors.extend(self.parse_process_errors(row))
             errors.extend(self.check_model(row))
             errors.extend(self.check_kinematics(row))
@@ -733,13 +972,71 @@ class HPSpreadsheet(Toplevel):
             errors.extend(self.check_collections(row))
             if self.pt.model.df['HP-DeviceLocalID'][row] not in uniqueIDs:
                 uniqueIDs.append(self.pt.model.df['HP-DeviceLocalID'][row])
+            name = self.pt.model.df['ImageFilename'][row] if self.pt.model.df["Type"][row] != "model" else \
+                os.path.normpath(os.path.join(self.dir, "model", self.pt.model.df['ImageFilename'][row].split(".")[0]))
+            files_in_csv.append(name)
+
+        local_id = self.pt.model.getValueAt(0, 9)
+        tkerrs = [[], []]
+        if self.device_type == "CellPhone":
+            browser_res_list = ValidResolutions(self, self.settings.get_key("apiurl"),
+                                                self.settings.get_key("apitoken"),
+                                                local_id=local_id).get_resolutions()
+
+            for r in resolutions:
+                opp = "secondary" if r[1] == 'primary' else 'primary'
+                if r[1] != "":
+                    if r[0] not in browser_res_list[r[1]]:
+                        tkerrs[0].append("{0}x{1} - {2}.".format(r[0][0], r[0][1], r[1]))
+                    if r[0] in browser_res_list[opp] and not r[0] in browser_res_list[r[1]]:
+                        tkerrs[1].append("{0}x{1} - Tagged:{2} Found:{3}".format(r[0][0], r[0][1], r[1], opp))
+                else:
+                    tkMessageBox.showerror("Error", "The HP-PrimarySecondary field MUST be filled in prior to uploading.")
+                    return None, True
+
+        if tkerrs[0] or tkerrs[1]:
+            tkMessageBox.showwarning("New Resolutions", "\nThe following resolutions do not exist under the camera "
+                                     "indicated\n" * (len(tkerrs[0]) > 0) + "\n".join(tkerrs[0]) + "\nThe following "
+                                     "resolutions were found online tagged as the opposite.\n" *(len(tkerrs[1]) > 0) +
+                                     "\n".join(tkerrs[1]) + "\n\nPlease check your HP-PrimarySecondary selections.")
 
         for coord in self.highlighted_cells:
             val = str(self.pt.model.getValueAt(coord[0], coord[1]))
             if val == '':
                 currentColName = list(self.pt.model.df.columns.values)[coord[1]]
-                errors.append('Invalid entry at column ' + currentColName + ', row ' + str(
-                            coord[0] + 1) + '. This cell is mandatory.')
+                err = 'Invalid entry at column ' + currentColName + ', row ' + str(
+                            coord[0] + 1) + '. This cell is mandatory.'
+                if err not in errors:
+                    errors.append(err)
+
+        for root, dirs, files in os.walk(self.dir):
+            for f in files:
+                if os.path.splitext(f)[1] not in ['.csv', '.tar']:
+                    if any(x in os.path.normpath(root).split("\\") for x in ['image', 'video', 'audio']):
+                        files_in_dir.append(f)
+                    elif 'model' in os.path.normpath(root).split('\\'):
+                            files_in_dir.append(os.path.normpath(root))
+                    else:
+                        continue
+
+        dif_list = [x for x in files_in_dir if (x not in files_in_csv and "_" not in x and os.path.splitext(x)[1]
+                                                not in ["tar", "gpg"])]
+
+        if dif_list:
+            ans = tkMessageBox.askyesno("Missing Data", "There have been files found in the output directory that are"
+                                                        " not in the csv.  Would you like to delete them?")
+            if ans:
+                for root, dirs, files in os.walk(self.dir):
+                    for f in files:
+                        if f in dif_list:
+                            os.remove(os.path.join(root, f))
+                    if os.path.normpath(root) in dif_list:
+                        shutil.rmtree(root, ignore_errors=True)
+            else:
+                dif_errs = []
+                for dif in dif_list:
+                    dif_errs.append("Addition file ({0}) found in directory, and not in CSV.".format(dif))
+                errors.extend(dif_errs)
 
         if len(uniqueIDs) > 1:
             errors.append('Multiple cameras identified. Each processed dataset should contain data from only one camera.')
@@ -784,7 +1081,10 @@ class HPSpreadsheet(Toplevel):
             try:
                 dbData = self.master.cameras[self.pt.model.df['HP-DeviceLocalID'][row]]
             except KeyError:
-                errors[image].append(('HP-DeviceLocalID', 'Invalid Device Local ID ' + self.pt.model.df['HP-DeviceLocalID'][row]))
+                try:
+                    errors[image].append(('HP-DeviceLocalID', 'Invalid Device Local ID ' + self.pt.model.df['HP-DeviceLocalID'][row]))
+                except TypeError:
+                    pass
                 continue
             for item in dbData:
                 if dbData[item] is None or dbData[item] == 'nan':
@@ -916,8 +1216,11 @@ class HPSpreadsheet(Toplevel):
         errors = []
         model = self.pt.model.df['HP-CameraModel'][row]
         if pd.isnull(model) or model.lower() == 'nan' or model == '':
-            imageName = self.pt.model.getValueAt(row, 0)
-            errors.append('No camera model entered for ' + imageName + ' (row ' + str(row + 1) + ')')
+            if self.pt.model.df['Type'][row] != "model":
+                imageName = self.pt.model.getValueAt(row, 0)
+                errors.append('No camera model entered for ' + imageName + ' (row ' + str(row + 1) + ')')
+            else:
+                pass
         elif model not in [self.devices[data]['hp_camera_model'] for data in self.devices if
                          self.devices[data]['hp_camera_model'] is not None]:
             errors.append('Invalid camera model ' + model + ' (row ' + str(row + 1) + ')')
@@ -931,12 +1234,15 @@ class HPSpreadsheet(Toplevel):
         """
         errors = []
         localID = self.pt.model.df['HP-DeviceLocalID'][row]
-        if localID.lower() == 'nan' or localID == '':
-            imageName = self.pt.model.getValueAt(row, 0)
-            errors.append('No Device Local ID entered for ' + imageName + ' (row' + str(row + 1) + ')')
-        elif localID not in [self.devices[data]['hp_device_local_id'] for data in self.devices if
-                         self.devices[data]['hp_device_local_id'] is not None]:
-            errors.append('Invalid localID ' + localID + ' (row ' + str(row + 1) + ')')
+        try:
+            if localID.lower() == 'nan' or localID == '':
+                imageName = self.pt.model.getValueAt(row, 0)
+                errors.append('No Device Local ID entered for ' + imageName + ' (row' + str(row + 1) + ')')
+            elif localID not in [self.devices[data]['hp_device_local_id'] for data in self.devices if
+                             self.devices[data]['hp_device_local_id'] is not None]:
+                errors.append('Invalid localID ' + localID + ' (row ' + str(row + 1) + ')')
+        except AttributeError:
+            pass
         return errors
 
 
@@ -991,9 +1297,10 @@ class CustomTable(pandastable.Table):
     """
     Backend for pandastable. Modify this to change shortcuts, right-click menus, cell movement, etc.
     """
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, color_cb=None, **kwargs):
         pandastable.Table.__init__(self, parent=master, **kwargs)
-        self.copied_val = None
+        self.color_cb = color_cb
+        self.copied_val = None, None
 
     def doBindings(self):
         """Bind keys and mouse clicks, this can be overriden"""
@@ -1046,11 +1353,34 @@ class CustomTable(pandastable.Table):
         self.focus_set()
         return
 
+    def get_col_by_name(self, name):
+        for i in range(0, self.cols):
+            if self.model.getColumnName(i).lower() == name.lower():
+                return i
+        return None
+
+    def get_row_by_image_name(self, name):
+        col_num = self.get_col_by_name("ImageFilename")
+        for row in range(0, self.rows):
+            if self.model.getValueAt(row, col_num) == name:
+                return row
+        return None
+
     def enter_true(self, event=None):
-        self.fill_selection(val='True')
+        current = self.getSelectedColumn()
+        ps_col = self.get_col_by_name("HP-PrimarySecondary")
+        if current == ps_col:
+            self.fill_selection(val='primary')
+        else:
+            self.fill_selection(val='True')
 
     def enter_false(self, event=None):
-        self.fill_selection(val='False')
+        current = self.getSelectedColumn()
+        ps_col = self.get_col_by_name("HP-PrimarySecondary")
+        if current == ps_col:
+            self.fill_selection(val='secondary')
+        else:
+            self.fill_selection(val='False')
 
     def fill_selection(self, event=None, val=None):
         if hasattr(self, 'disabled_cells'):
@@ -1062,8 +1392,12 @@ class CustomTable(pandastable.Table):
         col = self.getSelectedColumn()
         row = self.getSelectedRow()
         val = val if val is not None else self.model.getValueAt(row, col)
-        for row in range(self.startrow,self.endrow+1):
-            for col in range(self.startcol, self.endcol+1):
+        max_row = max(self.startrow, self.endrow)
+        min_row = min(self.startrow, self.endrow)
+        max_col = max(self.startcol, self.endcol)
+        min_col = min(self.startcol, self.endcol)
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
                 if hasattr(self, 'disabled_cells') and (row, col) in self.disabled_cells:
                     continue
                 self.undo.append((self.model.getValueAt(row, col), row, col))
@@ -1074,8 +1408,9 @@ class CustomTable(pandastable.Table):
 
     def fill_column(self, event=None):
         col = self.getSelectedColumn()
+        col_name = self.model.getColumnName(col)
         rowList = range(0, self.rows)
-        if hasattr(self, 'disabled_cells'):
+        if hasattr(self, 'disabled_cells') and not col_name == "HP-ReleaseForms":
             if not self.check_disabled_cells(rowList, [col]):
                 return
         self.focus_set()
@@ -1083,7 +1418,8 @@ class CustomTable(pandastable.Table):
         row = self.getSelectedRow()
         val = self.model.getValueAt(row, col)
         for row in rowList:
-            if hasattr(self, 'disabled_cells') and (row, col) in self.disabled_cells:
+            if hasattr(self, 'disabled_cells') and (row, col) in self.disabled_cells and not \
+                    col_name == "HP-ReleaseForms":
                 continue
             self.undo.append((self.model.getValueAt(row, col), row, col))
             self.model.setValueAt(val, row, col)
@@ -1103,18 +1439,47 @@ class CustomTable(pandastable.Table):
         self.focus_set()
         col = self.getSelectedColumn()
         row = self.getSelectedRow()
-        self.copied_val = self.model.getValueAt(row, col)
+        self.copied_val = (self.model.getValueAt(row, col), self.model.getColumnName(col))
         self.redraw()
 
     def paste_value(self, event=None):
         self.focus_set()
         col = self.getSelectedColumn()
+        col_name = self.model.getColumnName(col)
         row = self.getSelectedRow()
-        if hasattr(self, 'disabled_cells') and (row, col) in self.disabled_cells:
+        if hasattr(self, 'disabled_cells') and (row, col) in self.disabled_cells and col_name != "HP-ReleaseForms":
             return
-        if self.copied_val is not None:
+        # xnor between copied value and current column being HP-ReleaseForms
+        if (self.copied_val[1] == "HP-ReleaseForms") != (col_name == "HP-ReleaseForms"):
+            tkMessageBox.showerror("Paste Error", "HP-ReleaseForms cell values cannot be mixed with other columns.",
+                                   master=self.master)
+            return
+        if self.copied_val[0] is not None:
             self.undo = [(self.model.getValueAt(row, col), row, col)]
-            self.model.setValueAt(self.copied_val, row, col)
+            self.model.setValueAt(self.copied_val[0], row, col)
+        self.redraw()
+
+    def deleteCells(self, rows, cols, answer=None):
+        from itertools import product
+        from numpy import nan
+        # Remove possibility of deleting disabled data (You can select negative index values by dragging too high up)
+        rows = [r for r in rows if r >= 0]
+        cols = [c for c in cols if c >= 0]
+
+        disabled = [(row, col) for (row, col) in product(rows, cols) if (row, col) in self.disabled_cells and
+                    self.model.getColumnName(col) != "HP-ReleaseForms"] if hasattr(self, "disabled_cells") else []
+        self.storeCurrent()
+        if disabled:
+            self.undo = []
+            for row, col in product(rows, cols):
+                if (row, col) in disabled:
+                    continue
+                else:
+                    self.undo.append([self.model.getValueAt(row, col), row, col])
+                    self.model.setValueAt(nan, row, col)
+        else:
+            self.undo = [[self.model.getValueAt(row, col), row, col] for (row, col) in product(rows, cols)]
+            self.model.deleteCells(rows, cols)
         self.redraw()
 
     def move_selection(self, event, direction='down', entry=False):
@@ -1354,6 +1719,26 @@ class CustomTable(pandastable.Table):
         self.importpath = os.path.dirname(filename)
         return
 
+    def bind_columns(self, tab=None):
+        self.tab = tab
+        self.tablecolheader.bind("<B1-Motion>", self.mouse_drag_with_color_cb)
+
+    def mouse_drag_with_color_cb(self, event):
+        self.tablecolheader.handle_mouse_drag(event)
+        self.tablecolheader.bind("<ButtonRelease-1>", self.release)
+        return
+
+    def deleteRow(self):
+        pandastable.Table.deleteRow(self)
+        self.resetIndex()
+        self.color_cb()
+
+    def release(self, event):
+        self.tablecolheader.handle_left_release(event)
+        if self.color_cb:
+            self.color_cb(tab=self.tab)
+        self.tablecolheader.bind("<ButtonRelease-1>", self.handle_left_release)
+        return
 
     # right click menu!
     def popupMenu(self, event, rows=None, cols=None, outside=None):

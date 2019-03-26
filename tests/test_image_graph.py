@@ -1,20 +1,20 @@
 from maskgen import image_graph
 import unittest
+from test_support import TestSupport
+import os
+import shutil
 
-class TestImageGraph(unittest.TestCase):
+class TestImageGraph(TestSupport):
 
    def test_filetype(self):
-      graph = image_graph.createGraph('images/sample.json','image')
+      graph = image_graph.createGraph(self.locateFile('images/sample.json'),'image')
       self.assertTrue('hat' in graph.get_nodes())
       self.assertTrue(graph.G.graph['idcount'] == graph.idc)
       self.assertTrue(graph.G.graph['projecttype'] == 'image')
-      #self.assertTrue(graph.G.graph['igversion'] == '0.1')
       self.assertTrue(graph.idc > 1)
-      graph = image_graph.createGraph('tests/video.json')
-      self.assertTrue(graph.G.graph['projecttype'] == 'video')
 
    def test_subgraph(self):
-       initial = image_graph.createGraph('images/sample.json','image')
+       initial = image_graph.createGraph(self.locateFile('images/sample.json'),'image')
        graph = initial.subgraph(['sample','orig_input','input_mod_1'])
        self.assertEqual(3,len(graph.get_nodes()))
        self.assertEqual(2,len(graph.get_edges()))
@@ -33,13 +33,23 @@ class TestImageGraph(unittest.TestCase):
         self.assertEqual(result[0],'videomasks[0].videosegment')
 
    def test_attribute_replace(self):
-       graph = image_graph.createGraph('images/sample.json', 'image')
-       id1=  graph.add_node('foo.jpg',xxx=1)
-       id2 = graph.add_node('bar.jpg', xxx=1)
+       if os.path.exists('test_image_graph'):
+           shutil.rmtree('test_image_graph')
+       os.mkdir('test_image_graph')
+       shutil.copy(self.locateFile('images/sample.jpg'),'test_image_graph/foo.jpg')
+       shutil.copy(self.locateFile('images/sample.jpg'), 'test_image_graph/bar.jpg')
+       graph = image_graph.createGraph('test_image_graph/foo.json', 'image',)
+       graph.add_node('test_image_graph/foo.jpg',xxx=1)
+       graph.add_node('test_image_graph/bar.jpg', xxx=1)
+       nodes=  graph.get_nodes()
        graph.setDataItem('xxx',1)
-       graph.add_edge(id1,id2, xxx=1)
+       graph.setDataItem('projectfile',self.locateFile('tests/data/camera_sizes.json'))
+       self.assertTrue(os.path.exists(os.path.join('test_image_graph','camera_sizes.json')))
+       graph.add_edge(nodes[0],nodes[1], xxx=1)
        graph.replace_attribute_value('xxx',1,2)
        self.assertEquals(graph.getDataItem('xxx'),2)
+
+       shutil.rmtree('test_image_graph')
 
 if __name__ == '__main__':
     unittest.main()

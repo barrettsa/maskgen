@@ -1,11 +1,14 @@
-import sys
-import os
 import json
-import subprocess
 import logging
+import os
+import subprocess
+import sys
 import tarfile
-import importlib
 import traceback
+import copy
+
+import config
+from maskgen.ioc.registry import IoCComponent, Method, broker
 
 """
 Manage and invoke all JT plugins that support operations on node media (images, video and audio)
@@ -13,10 +16,7 @@ Manage and invoke all JT plugins that support operations on node media (images, 
 
 MainModule = "__init__"
 
-loaded = None
-
 def installPlugin(zippedFile):
-    global loaded
     def extract_archive(fname, dir):
         try:
             archive = tarfile.open(fname, "r:gz", errorlevel=2)
@@ -35,6 +35,7 @@ def installPlugin(zippedFile):
         archive.close()
         return list(pluginnames)
 
+    loaded = config.global_config.get('plugins', PluginManager({}))
     pluginFolders = [os.path.join('.', "plugins"), os.getenv('MASKGEN_PLUGINS', 'plugins')]
     pluginFolders.extend([os.path.join(x, 'plugins') for x in sys.path if 'maskgen' in x])
     for folder in pluginFolders:
@@ -92,25 +93,103 @@ def getPlugins(reload=False,customFolders=[]):
                 plugins[os.path.splitext(j)[0]] = {"custom": location}
     return plugins
 
-def loadCustom(plugin, path):
-    """
-    loads a custom plugin
-    """
-    global loaded
-    logging.getLogger('maskgen').info("Loading plugin " + plugin)
-    try:
-        with open(path) as jfile:
-            data = json.load(jfile)
-        loaded[plugin] = {}
-        loaded[plugin]['function'] = 'custom'
-        loaded[plugin]['operation'] = data['operation']
-        loaded[plugin]['command'] = data['command']
-        loaded[plugin]['group'] = None
-        loaded[plugin]['mapping'] = data['mapping'] if 'mapping' in data else None
-        loaded[plugin]['suffix'] = data['suffix'] if 'suffix' in data else None
-    except Exception as e:
-        logging.getLogger('maskgen').error("Failed to load plugin {}: {} ".format(plugin, str(e)))
+class EchoInterceptor:
+    def __init__(self, provided_broker):
+        provided_broker.register('PluginManager', self)
 
+    def _callPlugin(self, definition, im, source, target, **kwargs):
+        return None,None
+
+class PluginCaller:
+
+    def __init__(self,provided_broker):
+        provided_broker.register('PluginManager', self)
+
+    def _callPlugin(self, definition, im, source, target, **kwargs):
+        if definition['function'] == 'custom':
+            return _runCustomPlugin(definition, im, source, target, **kwargs)
+        else:
+            return definition['function'](im, source, target, **kwargs)
+
+
+class PluginManager:
+    caller = IoCComponent('PluginManager', Method('_callPlugin'))
+
+    def __init__(self,plugins={}):
+        self.plugins=plugins
+        #default
+        PluginCaller(broker)
+
+    def getBroker(self):
+        return broker
+
+    def getPreferredSuffix(self,name,filetype=None):
+        name=name.split('::')[0]
+        loaded = self.plugins
+        if 'suffix' in loaded[name]:
+            suffix = loaded[name]['suffix']
+        if suffix is not None:
+            if type(suffix) == dict and filetype is not None:
+                return suffix[filetype]
+            return suffix
+        return None
+
+    def getOperations(self,fileType=None):
+        ops = {}
+        loaded = self.plugins
+        for l in loaded.keys():
+            if 'operation' not in loaded[l]:
+                logging.getLogger('maskgen').error('Invalid plugin {}'.format(l))
+                continue
+            transitions = loaded[l]['operation']['transitions'] if 'transitions' in loaded[l]['operation'] else []
+            transitions = [t.split('.')[0] for t in transitions]
+            if len(transitions) == 0:
+                continue
+            if fileType is None or fileType in transitions:
+                ops[l] = loaded[l]
+        return ops
+
+    def getOperation(self,name):
+        loaded = self.plugins
+        if name not in loaded:
+            logging.getLogger('maskgen').warning('Requested plugin not found: ' + str(name))
+            return None
+        return loaded[name]['operation']
+
+    def callPlugin(self,name,im,source,target,**kwargs):
+        loaded = self.plugins
+        if name not in loaded:
+            raise ValueError('Request plugined not found: ' + str(name))
+        try:
+            return self._callPlugin(loaded[name],im, source, target, **kwargs)
+        except Exception as e:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            trace = traceback.format_exception(exc_type, exc_value, exc_traceback)
+            logging.getLogger('maskgen').error(
+                'Plugin {} failed with {} for arguments {}'.format(name, str(e), str(kwargs)))
+            logging.getLogger('maskgen').error(' '.join(trace))
+            raise e
+
+    def _callPlugin(self, definition, im, source, target, **kwargs):
+        return self.caller(definition, im, source, target, **kwargs)
+
+    def loadCustom(self,name, path):
+        """
+        loads a custom plugin
+        """
+        logging.getLogger('maskgen').info("Loading plugin " + name)
+        try:
+            with open(path) as jfile:
+                data = json.load(jfile)
+                self.plugins[name] = {}
+                self.plugins[name]['function'] = 'custom'
+                self.plugins[name]['operation'] = data['operation']
+                self.plugins[name]['command'] = data['command']
+                self.plugins[name]['group'] = None
+                self.plugins[name]['mapping'] = data['mapping'] if 'mapping' in data else None
+                self.plugins[name]['suffix'] = data['suffix'] if 'suffix' in data else None
+        except Exception as e:
+            logging.getLogger('maskgen').error("Failed to load plugin {}: {} ".format(name, str(e)))
 
 def pluginSummary():
     import csv
@@ -129,82 +208,55 @@ def pluginSummary():
 
 
 def loadPlugins(reload=False, customFolders=[]):
-   global loaded
-
-   if loaded is not None and not reload:
-       return loaded
-
-   loaded = {}
-   ps = getPlugins(customFolders=customFolders)
-   for i in ps.keys():
-      if 'custom' in ps[i]:
-          path = ps[i]['custom']
-          loadCustom(i, path)
-      else:
-          _loadPluginModule(ps[i]['info'],i,loaded)
-
-   return loaded
+    """
+     :param reload:
+     :param customFolders:
+     :return:
+     @rtype: PluginManager
+    """
+    if 'plugins' in config.global_config and not reload:
+        return config.global_config['plugins']
+    loaded = {}
+    config.global_config['plugins'] = PluginManager(loaded)
+    ps = getPlugins(customFolders=customFolders)
+    for i in ps.keys():
+        if 'custom' in ps[i]:
+            path = ps[i]['custom']
+            config.global_config['plugins'].loadCustom(i, path)
+        else:
+            _loadPluginModule(ps[i]['info'], i, loaded)
+    return config.global_config['plugins']
 
 def getOperations(fileType=None):
-    global loaded
-    ops = {}
-    for l in loaded.keys():
-        if 'operation' not in loaded[l]:
-            logging.getLogger('maskgen').error('Invalid plugin {}'.format(l))
-            continue
-        transitions = loaded[l]['operation']['transitions'] if 'transitions' in loaded[l]['operation'] else []
-        transitions = [t.split('.')[0] for t in transitions]
-        if fileType is None or fileType in transitions:
-            ops[l] = loaded[l]
-    return ops
+    return config.global_config['plugins'].getOperations(fileType=fileType)
 
-
-def getPreferredSuffix(name):
-    global loaded
-    return loaded[name]['suffix'] if 'suffix' in loaded[name] else None
+def getPreferredSuffix(name,filetype= None):
+    return config.global_config['plugins'].getPreferredSuffix(name,filetype=filetype)
 
 def getOperation(name):
-    global loaded
-    if name not in loaded:
-        logging.getLogger('maskgen').warning('Requested plugin not found: ' + str(name))
-        return None
-    return loaded[name]['operation']
+    parts = name.split('::')
+    plugin_name = parts[0]
+    op = config.global_config['plugins'].getOperation(plugin_name)
+    if  op is not None and len(parts) > 1:
+        op = copy.copy(op)
+        op['name'] = op['name'] + '::' + parts[1]
+    return op
 
 def callPlugin(name,im,source,target,**kwargs):
-    global loaded
-    if loaded is None:
-        loaded = loadPlugins()
-    if name not in loaded:
-        raise ValueError('Request plugined not found: ' + str(name))
-    if loaded[name]['function'] == 'custom':
-        return runCustomPlugin(name, im, source, target, **kwargs)
-    else:
-        try:
-            return loaded[name]['function'](im,source,target,**kwargs)
-        except Exception as e:
-            logging.getLogger('maskgen').error('Plugin {} failed with {} for arguments {}'. format(name, str(e), str(kwargs)))
-            logging.getLogger('maskgen').error(' '.join(traceback.format_stack()))
-            raise e
+    return config.global_config['plugins'].callPlugin(name.split('::')[0],im,source,target,**kwargs)
 
-def runCustomPlugin(name, im, source, target, **kwargs):
-    global loaded
+def _runCustomPlugin(command, im, source, target, **kwargs):
     import copy
-    if name not in loaded:
-        raise ValueError('Request plugined not found: ' + str(name))
-    commands = copy.deepcopy(loaded[name]['command'])
-    mapping = copy.deepcopy(loaded[name]['mapping'])
+    commands = copy.deepcopy(command['command'])
+    mapping = copy.deepcopy(command['mapping'])
     executeOk = False
-    try:
-        for k, command in commands.items():
-            if sys.platform.startswith(k):
-                executeWith(command, im, source, target, mapping, **kwargs)
-                executeOk = True
-                break
-        if not executeOk:
-            executeWith(commands['default'], im, source, target, mapping, **kwargs)
-    except Exception as e:
-        logging.getLogger('maskgen').error('Plugin {} failed with {} for arguments {}'.format(name,str(e), str(kwargs)))
-        raise e
+    for k, command in commands.items():
+        if sys.platform.startswith(k):
+            executeWith(command, im, source, target, mapping, **kwargs)
+            executeOk = True
+            break
+    if not executeOk:
+        executeWith(commands['default'], im, source, target, mapping, **kwargs)
     return None, None
 
 def executeWith(executionCommand, im, source, target, mapping, **kwargs):
@@ -223,7 +275,6 @@ def executeWith(executionCommand, im, source, target, mapping, **kwargs):
     ret = subprocess.call(executionCommand,shell=shell)
     if ret != 0:
         raise RuntimeError('Plugin {} failed with code {}'.format(executionCommand[0],ret))
-
 
 def mapCmdArgs(args, mapping):
     import copy

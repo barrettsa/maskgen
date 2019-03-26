@@ -1,3 +1,11 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+#==============================================================================
+
 import matplotlib
 matplotlib.use("TkAgg")
 from Tkinter import *
@@ -117,7 +125,11 @@ class GroupManagerDialog(tkSimpleDialog.Dialog):
         return
 
     def savecondition(self, grpName):
+        import logging
         grp = self.gfl.getGroup(grpName)
+        if grp is None:
+            logging.getLogger('maskgen').warn('Group {} not found'.format(grpName))
+            return
         grp.filters = []
         for filter in self.assignedBox.get(0, END):
             grp.filters.append(filter)

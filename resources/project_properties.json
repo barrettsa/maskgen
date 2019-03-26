@@ -4,32 +4,42 @@
       "description": "Last Update User Name",
       "name": "username",
       "type": "string",
-      "readonly": "true",
+      "readonly": true,
       "information":  "This property may be changed under File->Settings->Username"
     },
      {
       "description": "Creator",
       "name": "creator",
       "type": "string",
-      "readonly": "true",
+      "readonly": true,
       "information":  "This property cannot be changed"
     },
     {
       "description": "Organization",
       "name": "organization",
       "type": "string",
-      "mandatory": true
+      "mandatory": true,
+      "information":"Journal Creation Organzation"
     },
     {
       "description":"Description",
       "name": "projectdescription",
       "type": "text",
-      "mandatory": true
+      "mandatory": true,
+      "information": "Journal Description"
+    },
+    {
+      "description":"Project File",
+      "name": "projectfile",
+      "type": "file:*",
+      "mandatory": false,
+      "information": "A project file from the editing software"
     },
     {
       "description": "Technical Summary",
       "name": "technicalsummary",
-      "type": "text"
+      "type": "text",
+      "information": "Journal Technical Summary"
     },
     {
       "description": "Provenance",
@@ -47,19 +57,19 @@
       "description": "Validation",
       "name": "validation",
       "type": "yesno",
-      "readonly": "true"
+      "readonly": true
     },
     {
       "description": "Validated By",
       "name": "validatedby",
       "type": "string",
-      "readonly": "true"
+      "readonly": true
     },
     {
       "description": "Validation Date",
       "name": "validationdate",
       "type": "string",
-      "readonly": "true"
+      "readonly": true
     },
     {
       "description": "Semantic Restaging",
@@ -84,7 +94,7 @@
       "description" : "Paste Clone Auto Input Mask",
       "name": "autopastecloneinputmask",
       "type":"yesno",
-      "readonly":"true",
+      "readonly":true,
       "information": "if the input mask was guessed"
     },
     {
@@ -451,7 +461,7 @@
        "description": "AntiForensic CFACorrection",
        "name": "antiforensiccfacorrection",
        "node" : true,
-       "operations": ["CFACorrection"],
+       "operations": ["CFACorrection", "AddCameraModel"],
        "type": "yesno",
        "information": "AntiForensic CFACorrection"
     },
@@ -551,7 +561,14 @@
       "semanticgroup" : true,
       "information": "Change lighting to indicate a different time of day"
     },
- {
+	{
+      "description": "Date and Time",
+      "name": "dateandtime",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Change the date and time for ENF and time specific environment change detection"
+    },
+	{
       "description": "Date Burn-in",
       "name": "dateburnin",
       "type": "yesno",
@@ -594,6 +611,13 @@
       "information": "Manipulations to alter a shadows."
     },
     {
+      "description": "Weather Changes",
+      "name": "weatherchanges",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Radically alter the weather, (e.g. add snow or rain to a sunny day)"
+    },
+    {
       "description": "Ambience Audio Swap",
       "name": "ambienceaudioswap",
       "type": "yesno",
@@ -621,6 +645,76 @@
       "semanticgroup" : true,
       "information": "Manipulations to reflections."
     },
+	{
+	  "description": "Tattoos",
+      "name": "Tattoos",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Adding, Removing, or Altering  Tattoos"
+	},
+	{
+	  "description": "Personal Appearance",
+      "name": "Personal Appearance",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Skin Color Change, Dirty Clothing, Coal Dust, Dirt on Skin, Adding or Removing Hair"		
+	},
+	{
+	  "description": "Building Destruction",
+      "name": "Building Destruction",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Destroying a building to look like it was attacked or collapsed"	
+	},
+    {
+	  "description": "Drone Video Tests",
+      "name": "Drone Video Tests",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Processing to make a synthetic video journal"
+	},
+    {
+	  "description": "Manhattan World",
+      "name": "Manhattan World",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Putting a object with corners and depth into a Manhattan World image example: table, box, frame"	
+	},
+    {
+	  "semanticgroup": true,
+      "information": "Change recaptured documents nefariously. Example: Signature Change",
+      "type": "yesno",
+      "description": "Falsifying Documents",
+      "name": "FalsifyingDocuments"
+    },
+    {
+      "description": "splice/copy",
+      "name": "splice/copy",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information" : "copying an object into a scene to create a copy of an object in the scene already"
+    },
+    {
+	  "description": "ENF",
+      "name": "ENF",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Tests suitable for electric network frequency"
+	},
+    {
+      "description":"Frame From Video",
+      "name":"FrameFromVideo",
+      "type":"yesno",
+      "semanticgroup": true,
+      "information":"Taking 1 frame of a video and using that frame as a part of a manipulation"
+    },
+    {
+	  "description": "Disaster",
+      "name": "Disaster",
+      "type": "yesno",
+      "semanticgroup" : true,
+      "information": "Building Fire, Flooding, Earth Quake"
+	},
     {
       "description": "Mosaicing",
       "name": "mosaicing",
@@ -629,6 +723,7 @@
       "operations": ["AdditionalEffectMosaic","Mosaic"],
       "information": "Mosaicing."
     },
+
     {
       "description": "Seam Carving",
       "name": "seamcarving",
@@ -677,6 +772,37 @@
        "readonly": true,
        "information": "The maximum number of semantic units for all images produced by the project.",
       "rule" : "manipulationCategoryRule"
+    },
+    {
+      "description": "GAN Component",
+      "name": "gan_component",
+      "type": "yesno",
+      "readonly": true,
+      "node":true,
+      "information": "Has a GAN provided the manipulation.",
+      "operations": ["SynthesizeGAN","AddCameraModel","DeepFakeFaceSwap","ErasureByGAN","GANFill"],
+      "rule": "ganComponentRule",
+      "includedonors": true
+    },
+    {
+      "description": "GAN Generated",
+      "name": "gan_generated",
+      "type": "yesno",
+      "readonly": true,
+      "node":true,
+      "information": "Has a GAN provided the base media.",
+      "rule": "ganGeneratedRule",
+      "includedonors": false
+    },
+    {
+      "description": "CGI Generated",
+      "name": "cgi_generated",
+      "type": "yesno",
+      "readonly": true,
+      "node":true,
+      "information": "Has a CGI(model) provided the base media.",
+      "rule": "cgiGeneratedRule",
+      "includedonors": false
     }
   ]
 }

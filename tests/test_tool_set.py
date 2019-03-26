@@ -3,26 +3,49 @@ import unittest
 import numpy as np
 from maskgen import image_wrap
 from test_support import TestSupport
+import sys
 
 
 
 class TestToolSet(TestSupport):
+
+
+    def test_diff(self):
+        args = {'smoothing': 3, 'mode':'bgr', 'aggregate':'max','filling':'morphology'}
+        a = np.random.randint(0,255,(255,255,3)).astype('int16')
+        b = np.random.randint(0, 255, (255, 255, 3)).astype('int16')
+        m = tool_set.mediatedCompare(a,b, arguments= args)
+
     def test_filetype(self):
         self.assertEquals(tool_set.fileType(self.locateFile('images/hat.jpg')), 'image')
         self.assertEquals(tool_set.fileType(self.locateFile('images/sample.json')), 'text')
+        f = open('test.log', 'w+')
+        f.close()
+        self.addFileToRemove('test.log')
+        self.assertEquals(tool_set.fileType(self.locateFile('test.log')), 'text')
         self.assertEquals(tool_set.fileType(self.locateFile('tests/videos/sample1.mov')), 'video')
-
-
+        self.assertEquals(tool_set.fileType('foo.dng.zip'), 'zip')
+        self.assertEquals(tool_set.fileType('foo.jpg.zip'), 'zip')
+        self.assertEquals(tool_set.fileType('foo.png.zip'), 'zip')
+        self.assertEquals(tool_set.fileType('foo.oh.zip'), 'collection')
+        self.assertEquals(tool_set.fileType('foo.newgate.zip'), 'collection')
 
     def test_filetypes(self):
         self.assertTrue(("mov files", "*.mov") in tool_set.getFileTypes())
         self.assertTrue(("zipped masks", "*.tgz") in tool_set.getMaskFileTypes())
 
     def test_zip(self):
-        img = tool_set.openImage(self.locateFile('tests/zips/raw.zip'),tool_set.getMilliSecondsAndFrameCount('2'),preserveSnapshot=True)
+        import os
+        filename = self.locateFile('tests/zips/raw.zip')
+        self.addFileToRemove(os.path.join(os.path.dirname(filename), 'raw.png'))
+        img = tool_set.openImage(filename,tool_set.getMilliSecondsAndFrameCount('2'),preserveSnapshot=True)
         self.assertEqual((5796, 3870),img.size)
-        tool_set.condenseZip(self.locateFile('tests/zips/raw.zip'),keep=1)
-
+        tool_set.condenseZip(filename,keep=1)
+        self.addFileToRemove(os.path.join(os.path.dirname(filename),'raw_c.zip'))
+        contents = tool_set.getContentsOfZip(os.path.join(os.path.dirname(filename),'raw_c.zip'))
+        self.assertTrue('59487443539401a4d83512edaab3c1b2.cr2' in contents)
+        self.assertTrue('7d1800a38ca7a22021bd94e71b6e0f42.cr2' in contents)
+        self.assertTrue(len(contents) == 2)
 
 
     def test_rotate(self):
@@ -44,15 +67,18 @@ class TestToolSet(TestSupport):
                                      flags=cv2api.cv2api_delegate.inter_linear)
 
         mask[abs(img - img1) > 0] = 0
-        #image_wrap.ImageWrapper(mask * 100).save('mask.png')
-        #image_wrap.ImageWrapper(img*100).save('foo.png')
         img[10:15,10:15]=3
         img3 = tool_set.applyRotateToComposite(90, img, mask, img1.shape, local=True)
         self.assertTrue(np.all(img3[10:15,10:15]==3))
         img3[10:15, 10:15] = 0
-        #self.assertTrue((sum(img1[20:50,40]) - sum(img3[24:54,44]))==0)
-        #image_wrap.ImageWrapper(img3 * 100).save('foo2.png')
 
+    def testCropCompare(self):
+        import cv2
+        pre = tool_set.openImageFile(self.locateFile('tests/images/prefill.png')).to_array()
+        post = pre[10:-10,10:-10]
+        resized_post = cv2.resize(post, (pre.shape[1],pre.shape[0]))
+        mask, analysis = tool_set.cropResizeCompare(pre,resized_post, arguments={'crop width':pre.shape[1]-20,'crop height':pre.shape[0]-20})
+        self.assertEquals((10,10), tool_set.toIntTuple(analysis['location']))
 
     def test_fileMask(self):
         pre = tool_set.openImageFile(self.locateFile('tests/images/prefill.png'))
@@ -76,6 +102,10 @@ class TestToolSet(TestSupport):
             result =tool_set._remap(img1,mask,src_pts,dst_pts)
             self.assertTrue(np.all(result[55:65,15:25] == img1[20:30,50:60]))
 
+    def test_time_format(self):
+        t = tool_set.getDurationStringFromMilliseconds(100001.111)
+        self.assertEqual('00:01:40.001111',t)
+
     def test_timeparse(self):
         t, f = tool_set.getMilliSecondsAndFrameCount('00:00:00')
         self.assertEqual(1, f)
@@ -87,18 +117,13 @@ class TestToolSet(TestSupport):
         t,f = tool_set.getMilliSecondsAndFrameCount('03:10:10.434')
         self.assertEqual(0, f)
         self.assertEqual(1690434, t)
-        t, f = tool_set.getMilliSecondsAndFrameCount('03:10:10.434:23')
-        self.assertTrue(tool_set.validateTimeString('03:10:10.434:23'))
-        self.assertEqual(23, f)
-        self.assertEqual(1690434, t)
         t, f = tool_set.getMilliSecondsAndFrameCount('03:10:10:23')
-        self.assertTrue(tool_set.validateTimeString('03:10:10:23'))
+        self.assertFalse(tool_set.validateTimeString('03:10:10:23'))
         self.assertEqual(23,f)
         self.assertEqual(1690000, t)
-        t, f = tool_set.getMilliSecondsAndFrameCount('03:10:10:A')
+        t, f = tool_set.getMilliSecondsAndFrameCount('03:10:10:A', defaultValue=(0,0))
         self.assertFalse(tool_set.validateTimeString('03:10:10:A'))
-        self.assertEqual(0, 0)
-        self.assertEqual(None, t)
+        self.assertEqual((0,0), (t,f))
         time_manager = tool_set.VidTimeManager(startTimeandFrame=(1000,2),stopTimeandFrame=(1003,4))
         time_manager.updateToNow(999)
         self.assertTrue(time_manager.isBeforeTime())
@@ -116,15 +141,15 @@ class TestToolSet(TestSupport):
         time_manager.updateToNow(1005)
         self.assertFalse(time_manager.isPastTime())
         time_manager.updateToNow(1006)
-        self.assertTrue(time_manager.isPastTime())
+        self.assertFalse(time_manager.isPastTime())
         time_manager.updateToNow(1007)
-        self.assertTrue(time_manager.isPastTime())
+        self.assertFalse(time_manager.isPastTime())
         time_manager.updateToNow(1008)
         self.assertTrue(time_manager.isPastTime())
-        self.assertEqual(8,time_manager.getEndFrame() )
-        self.assertEqual(3, time_manager.getStartFrame())
+        self.assertEqual(9,time_manager.getEndFrame() )
+        self.assertEqual(4, time_manager.getStartFrame())
 
-        time_manager = tool_set.VidTimeManager(startTimeandFrame=(1000, 2), stopTimeandFrame=None)
+        time_manager = tool_set.VidTimeManager(startTimeandFrame=(999, 2), stopTimeandFrame=None)
         time_manager.updateToNow(999)
         self.assertTrue(time_manager.isBeforeTime())
         time_manager.updateToNow(1000)
@@ -146,20 +171,25 @@ class TestToolSet(TestSupport):
         min = np.min(result)
         max = np.max(result)
         result = (result - min)/(max-min) * 255.0
-        print np.mean(result)
 
     def test_gray_writing(self):
         import os
         import sys
+        import time
+        s  = time.clock()
         writer = tool_set.GrayBlockWriter('test_ts_gw', 29.97002997)
         mask_set = list()
         for i in range(255):
             mask = np.random.randint(255, size=(1090, 1920)).astype('uint8')
             mask_set.append(mask)
-            writer.write(mask, 33.3666666667,i+1)
+            writer.write(mask, 33.3666666667*i,i+1)
+        for i in range(300,350):
+            mask = np.random.randint(255, size=(1090, 1920)).astype('uint8')
+            mask_set.append(mask)
+            writer.write(mask, 33.3666666667*i, i + 1)
         writer.close()
         fn = writer.get_file_name()
-        reader = tool_set.GrayBlockReader(fn)
+        reader = tool_set.GrayBlockReader(fn, end_frame=305)
         pos = 0
         while True:
             mask = reader.read()
@@ -167,20 +197,74 @@ class TestToolSet(TestSupport):
                 break
             compare = mask == mask_set[pos]
             self.assertEqual(mask.size,sum(sum(compare)))
+            if pos == 255:
+                self.assertEqual(301,reader.current_frame()-1)
             pos += 1
+
         reader.close()
-        self.assertEqual(255, pos)
+        self.assertEqual(305, pos)
+        print time.clock()- s
         suffix = 'm4v'
         if sys.platform.startswith('win'):
             suffix = 'avi'
-        self.assertEquals('test_ts_gw_mask_33.3666666667.' + suffix,tool_set.convertToVideo(fn))
-        self.assertTrue(os.path.exists('test_ts_gw_mask_33.3666666667.' + suffix))
+        filename  = tool_set.convertToVideo(fn)
+        self.assertEquals('test_ts_gw_mask_0.0.' + suffix, filename)
+        self.assertTrue(os.path.exists(filename))
 
-        size = tool_set.openImage('test_ts_gw_mask_33.3666666667.' + suffix, tool_set.getMilliSecondsAndFrameCount('00:00:01:2')).size
-        print size
+        size = tool_set.openImage(filename, tool_set.getMilliSecondsAndFrameCount('00:00:01')).size
         self.assertTrue(size == (1920,1090))
-        os.remove('test_ts_gw_mask_33.3666666667.'+suffix)
-        os.remove('test_ts_gw_mask_33.3666666667.hdf5')
+        os.remove(filename)
+        os.remove(fn)
+
+    def testSIFCheck(self):
+        good_transform = {
+            'c': 3,
+            'r': 3,
+            'r0': [0.00081380729604268976, -1.0000367374350523, 449.94975699899271],
+            'r1': [1.0031702728345473, 0.0016183966076946312, -0.30844081957395447],
+            'r2': [3.1676664384933143e-06, 9.8915322781393527e-06, 1.0]
+        }
+        bad_transform = {
+            "c": 3,
+            "r": 3,
+            "r0": [-3.0764931522976067, 3.2522108810844577, 6167.618028229406],
+            "r1": [-1.0467579456165736, 1.1073481736839244, 2098.303251843684],
+            "r2": [-0.0004988685498607748, 0.0005275910530971817, 1.0]
+        }
+        self.assertTrue(tool_set.isHomographyOk(tool_set.deserializeMatrix(good_transform),450,450))
+        self.assertFalse(tool_set.isHomographyOk(  tool_set.deserializeMatrix(bad_transform),8000,5320))
+
+    def test_time_stamp(self):
+        v1 = self.locateFile('tests/images/test.png')
+        v2 = self.locateFile('tests/images/donor_to_blend.png')
+        v3 = self.locateFile('tests/images/test_time_change.png')
+        self.assertTrue(len(tool_set.dateTimeStampCompare(v1, v1))==0)
+        self.assertFalse(len(tool_set.dateTimeStampCompare(v1, v2))==0)
+        self.assertTrue(len(tool_set.dateTimeStampCompare(v1, v3))==0)
+
+
+    def test_compare(self):
+        from maskgen import tool_set
+        wrapper1 = image_wrap.openImageFile(self.locateFile('tests/images/pre_blend.png'))
+        arr2 = np.copy(wrapper1.image_array)
+        for x in np.random.randint(1,arr2.shape[0]-1,100):
+            for y in np.random.randint(1, arr2.shape[1] - 1, 100):
+                arr2[x,y,1] = arr2[x,y,1] + np.random.randint(-20,20)
+        arr2[100:200,100:200,2] = arr2[100:200,100:200,2] - 25
+        wrapper2 = image_wrap.ImageWrapper(arr2)
+
+        args = [{'aggregate': 'luminance', 'minimum threshold': 3, "weight": 4},
+                {'aggregate': 'luminance', 'minimum threshold': 3, "weight": 1},
+                {'aggregate': 'max'}]
+        for arg in args:
+            result = tool_set.mediatedCompare(wrapper1.to_array().astype('int16'),
+                                              wrapper2.to_array().astype('int16'),
+                                              arguments=arg)
+            self.assertTrue(np.all(result[0][100:200,100:200] == 255))
+            result[0][100:200, 100:200] = 0
+            self.assertTrue(np.all(result[0] == 0))
+        #image_wrap.ImageWrapper(result[0]).save('/Users/ericrobertson/Downloads/foo_max.png')
+
 
 
 if __name__ == '__main__':

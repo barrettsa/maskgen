@@ -1,51 +1,51 @@
-from image_graph import createGraph, current_version, getPathValues
-import exif
-import os
-import numpy as np
-import logging
-from tool_set import *
-import video_tools
-from software_loader import Software, getProjectProperties, ProjectProperty, MaskGenLoader, getRule
-import tempfile
-import plugins
-import graph_rules
-from image_wrap import ImageWrapper
-from PIL import Image
-from group_filter import  buildFilterOperation, GroupFilter, GroupOperationsLoader
-from graph_auto_updates import updateJournal
-import hashlib
-import shutil
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
+
 import collections
-from threading import Lock
-import mask_rules
-from mask_rules import ColorCompositeBuilder, Probe
-from maskgen.image_graph import ImageGraph
 import copy
+import shutil
+import tempfile
 import traceback
+from threading import Lock
+import ffmpeg_api
+import graph_rules
+import mask_rules
+import notifiers
+import plugins
+import video_tools
+from graph_auto_updates import updateJournal
+from group_filter import buildFilterOperation,  GroupFilter,  GroupOperationsLoader
+from image_graph import createGraph
+from image_wrap import ImageWrapper
+from maskgen.image_graph import ImageGraph
+from maskgen.video_tools import DummyMemory
+from support import MaskgenThreadPool, StatusTracker, getPathValuesFunc, getPathValues
+from software_loader import Software, getProjectProperties, getRule
+from tool_set import *
+from validation.core import Validator, ValidationMessage,Severity,removeErrorMessages
 
 def formatStat(val):
     if type(val) == float:
         return "{:5.3f}".format(val)
     return str(val)
 
-
 prefLoader = MaskGenLoader()
-
-
-def imageProjectModelFactory(name, **kwargs):
-    return ImageProjectModel(name, **kwargs)
-
 
 def defaultNotify(edge, message, **kwargs):
     return True
 
-def loadProject(projectFileName, notify=None):
+def loadProject(projectFileName, notify=None, username=None, tool=None):
     """
       Given JSON file name, open then the appropriate type of project
       @rtype: ImageProjectModel
     """
-    graph = createGraph(projectFileName)
-    return ImageProjectModel(projectFileName, graph=graph,notify=notify)
+    graph = createGraph(projectFileName, tool=tool)
+    return ImageProjectModel(projectFileName, graph=graph, notify=notify, username=username, tool=tool)
 
 
 def consolidate(dict1, dict2):
@@ -63,8 +63,14 @@ def consolidate(dict1, dict2):
 EdgeTuple = collections.namedtuple('EdgeTuple', ['start', 'end', 'edge'])
 
 
-def createProject(path, notify=None, base=None, name=None, suffixes=[], projectModelFactory=imageProjectModelFactory,
-                  organization=None):
+def createProject(path,
+                  notify=None,
+                  base=None,
+                  name=None,
+                  suffixes=[],
+                  tool=None,
+                  username=None,
+                  organization=None,preferences={}):
     """
         This utility function creates a ProjectModel given a directory.
         If the directory contains a JSON file, then that file is used as the project file.
@@ -84,33 +90,35 @@ def createProject(path, notify=None, base=None, name=None, suffixes=[], projectM
      @type notify: (str, str) -> None
      @rtype (ImageProjectModel, bool)
     """
-
     if path is None:
         path = '.'
         selectionSet = [filename for filename in os.listdir(path) if filename.endswith(".json") and \
-                        filename != 'operations.json' and filename != 'project_properties.json']
+                        filename not in  ['operations.json','project_properties.json']]
         if len(selectionSet) == 0:
-            return projectModelFactory(os.path.join('.', 'Untitled.json'), notify=notify), True
+            return ImageProjectModel(os.path.join('.', 'Untitled.json'), notify=notify, username=username, tool=tool), True
     else:
-        if (path.endswith(".json")):
-            return projectModelFactory(os.path.abspath(path), notify=notify), False
+        if (path.endswith(".json")) and os.path.exists(path):
+            return ImageProjectModel(os.path.abspath(path), notify=notify, username=username, tool=tool), False
+        # just a directory
         selectionSet = [filename for filename in os.listdir(path) if filename.endswith(".json")]
     if len(selectionSet) != 0 and base is not None:
         logging.getLogger('maskgen').warning('Cannot add base image/video to an existing project')
         return None
+    # JSON file not found and base image not provided
     if len(selectionSet) == 0 and base is None:
         logging.getLogger('maskgen').info(
             'No project found and base image/video not provided; Searching for a base image/video')
         suffixPos = 0
+        # look for a viable media file to create the project
         while len(selectionSet) == 0 and suffixPos < len(suffixes):
             suffix = suffixes[suffixPos]
             selectionSet = [filename for filename in os.listdir(path) if filename.lower().endswith(suffix)]
             selectionSet.sort()
             suffixPos += 1
-        projectFile = selectionSet[0] if len(selectionSet) > 0 else None
-        if projectFile is None:
+        if len(selectionSet) == 0:
             logging.getLogger('maskgen').warning('Could not find a base image/video')
             return None
+        projectFile = selectionSet[0]
     # add base is not None
     elif len(selectionSet) == 0:
         projectFile = os.path.split(base)[1]
@@ -125,15 +133,16 @@ def createProject(path, notify=None, base=None, name=None, suffixes=[], projectM
     if not existingProject:
         image = projectFile
         if name is None:
-            projectFile = projectFile[0:projectFile.rfind(".")] + ".json"
+            projectFile = os.path.splitext(projectFile)[0] + ".json"
         else:
             projectFile = os.path.abspath(os.path.join(path, name + ".json"))
-    model = projectModelFactory(projectFile, notify=notify, baseImageFileName=image)
+    model = ImageProjectModel(projectFile, notify=notify, baseImageFileName=image, username=username, tool=tool)
     if organization is not None:
         model.setProjectData('organization', organization)
+
     if image is not None:
         model.addImagesFromDir(path, baseImageFileName=os.path.split(image)[1], suffixes=suffixes, \
-                               sortalg=lambda f: os.stat(os.path.join(path, f)).st_mtime)
+                               sortalg=lambda f: os.stat(os.path.join(path, f)).st_mtime, preferences=preferences)
     return model, not existingProject
 
 
@@ -162,7 +171,6 @@ class MetaDiff:
             d[k] = {'Operation': v[0], 'Old': old, 'New': new}
         return d
 
-
 class VideoMetaDiff:
     """
      Video Meta-data changes are represented by section.
@@ -183,38 +191,23 @@ class VideoMetaDiff:
         return 'FRAME'
 
     def getSections(self):
-        return ['Global'] + self.diffData[1].keys()
+        return self.diffData.keys()
 
     def getColumnNames(self, section):
         return ['Operation', 'Old', 'New']
 
     def toColumns(self, section):
         d = {}
+        if len(self.diffData) == 0:
+            return d
         if section is None:
-            section = 'Global'
-        if section == 'Global':
-            self._sectionChanges(d, self.diffData[0])
-        else:
-            itemTuple = self.diffData[1][section]
-            if itemTuple[0] == 'add':
-                d['add'] = {'Operation': '', 'Old': '', 'New': ''}
-            elif itemTuple[0] == 'delete':
-                d['delete'] = {'Operation': '', 'Old': '', 'New': ''}
-            else:
-                for changeTuple in itemTuple[1]:
-                    if changeTuple[0] == 'add':
-                        d[str(changeTuple[1])] = {'Operation': 'add', 'Old': '',
-                                                  'New': str(changeTuple[3]) + ':=>' + str(changeTuple[2])}
-                    elif changeTuple[0] == 'delete':
-                        d[str(changeTuple[1])] = {'Operation': 'delete',
-                                                  'Old': str(changeTuple[3]) + ':=>' + str(changeTuple[2]), 'New': ''}
-                    else:
-                        self._sectionChanges(d, changeTuple[4], prefix=str(changeTuple[3]))
+            section = self.diffData.keys()[0]
+        self._sectionChanges(d, self.diffData[section])
         return d
 
     def _sectionChanges(self, d, sectionData, prefix=''):
         for k, v in sectionData.iteritems():
-            dictKey = k if prefix == '' else prefix + ': ' + str(k)
+            dictKey = str(k)
             old = v[1] if v[0].lower() == 'change' or v[0].lower() == 'delete' else ''
             new = v[2] if v[0].lower() == 'change' else (v[1] if v[0].lower() == 'add' else '')
             if type(old) is not str:
@@ -291,6 +284,9 @@ class Modification:
         self.category = category
         self.generateMask = generateMask
 
+    def getSemanticGroups(self):
+        return [] if self.semanticGroups is None else self.semanticGroups
+
     def setSemanticGroups(self, groups):
         self.semanticGroups = groups
 
@@ -343,11 +339,43 @@ class Modification:
         self.generateMask = op.generateMask
         self.recordMaskInComposite = op.recordMaskInComposite(filetype)
 
-
-
 class LinkTool:
+    """
+    LinkTools are used to handle the comparison and analysis of each each in the graph.
+    The link tools are organizaed by transitions of
+    media type: video->image, video->video, audio->video, etc.
+    """
+
     def __init__(self):
         return
+
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.donothing_processor"
+
+    def processDonors(self, scModel, start, destination, startIm, startFileName, destIm, destFileName, arguments, invert=False):
+        """
+
+        :param scModel:
+        :param destination:
+        :param startIm:
+        :param startFileName:
+        :param destIm:
+        :param destFileName:
+        :param arguments:
+        :param invert:
+        :return:
+        @type scModel: ImageProjectModel
+        """
+        result = scModel.getCreatingOperation(destination)
+        if result is not None:
+            return result[1].getDonorProcessor(default_processor=self.getDefaultDonorProcessor())(
+                                                          scModel.getGraph(),
+                                                          start,
+                                                          destination,
+                                                          result[0],
+                                                          (startIm, startFileName),
+                                                          (destIm, destFileName)).create(arguments=arguments,
+                                                          invert=invert)
 
     def compareImages(self, start, destination, scModel, op, invert=False, arguments={},
                       skipDonorAnalysis=False, analysis_params={}):
@@ -390,6 +418,8 @@ class LinkTool:
             except Exception as e:
                 logging.getLogger('maskgen').error('Failed to run analysis {}: {} '.format(analysisOp, str(e)))
 
+    def addSubstituteMasks(self, start, destination, scModel, op, arguments={}, filename=''):
+        return None
 
 class ImageImageLinkTool(LinkTool):
     """
@@ -443,33 +473,11 @@ class ImageImageLinkTool(LinkTool):
             predecessors = scModel.G.predecessors(destination)
             mask = None
             expect_donor_mask = False
+            analysis = {}
             if not skipDonorAnalysis:
                 errors = list()
-                for pred in predecessors:
-                    pred_edge = scModel.G.get_edge(pred, destination)
-                    edge_op = scModel.gopLoader.getOperationWithGroups(pred_edge['op'])
-                    expect_donor_mask = edge_op is not None and 'checkSIFT' in edge_op.rules
-                    if expect_donor_mask:
-                        mask = scModel.G.get_edge_image(pred, destination, 'arguments.pastemask')
-                        if mask is None:
-                            mask = scModel.G.get_edge_image(pred, destination, 'maskname')
-                        mask, analysis = interpolateMask(
-                            mask, startIm, destIm,
-                            arguments=consolidate(arguments, analysis_params), invert=invert)
-                        if mask is not None:
-                            mask = ImageWrapper(mask)
-                        break
-            if mask is None:
-                analysis = {}
-                predecessors = scModel.G.predecessors(start)
-                for pred in predecessors:
-                    edge = scModel.G.get_edge(pred, start)
-                    # probably should change this to == 'SelectRegion'
-                    if edge['op'] == 'SelectRegion':
-                        mask = invertMask(scModel.G.get_edge_image(pred, start, 'maskname'))
-                        if mask.size != startIm.size:
-                            mask = mask.resize(startIm.size, Image.ANTIALIAS)
-                        break
+                mask = self.processDonors(scModel, start, destination, startIm, startFileName, destIm, destFileName,
+                                          consolidate(arguments, analysis_params), invert=invert)
             if mask is None:
                 mask = convertToMask(startIm).invert()
                 if expect_donor_mask:
@@ -477,8 +485,8 @@ class ImageImageLinkTool(LinkTool):
                 analysis = {}
             else:
                 mask = startIm.apply_alpha_to_mask(mask)
-                analysis = {}
         else:
+            logging.getLogger('maskgen').debug('Create Mask')
             mask, analysis, error = createMask(startIm,
                                         destIm,
                                         invert=invert,
@@ -492,9 +500,11 @@ class ImageImageLinkTool(LinkTool):
                     start,
                     destination
                 ))
+            logging.getLogger('maskgen').debug('EXIF Compare')
             exifDiff = exif.compareexif(startFileName, destFileName)
             analysis = analysis if analysis is not None else {}
             analysis['exifdiff'] = exifDiff
+            logging.getLogger('maskgen').debug('Analysis')
             self._addAnalysis(startIm, destIm, op, analysis, mask, linktype='image.image',
                               arguments=consolidate(arguments, analysis_params),
                               start=start, end=destination, scModel=scModel)
@@ -508,6 +518,9 @@ class VideoImageLinkTool(ImageImageLinkTool):
 
     def __init__(self):
         ImageImageLinkTool.__init__(self)
+
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.video_without_audio_donor"
 
     def compare(self, start, end, scModel, arguments={}):
         """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
@@ -559,14 +572,15 @@ class VideoImageLinkTool(ImageImageLinkTool):
                               start=start, end=destination, scModel=scModel)
         return mask, analysis, errors
 
-
-class VideoVideoLinkTool(LinkTool):
+class ZipImageLinkTool(VideoImageLinkTool):
     """
-     Supports mask construction and meta-data comparison when linking video to video.
-     """
-
+    Supports mask construction and meta-data comparison when linking zip to image.
+    """
     def __init__(self):
-        LinkTool.__init__(self)
+        VideoImageLinkTool.__init__(self)
+
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.donothing_stream_processor"
 
     def compare(self, start, end, scModel, arguments={}):
         """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
@@ -576,35 +590,11 @@ class VideoVideoLinkTool(LinkTool):
         destIm, destFileName = scModel.getImageAndName(end)
         mask, analysis, errors = self.compareImages(start, end, scModel, 'noOp', skipDonorAnalysis=True,
                                                     arguments=arguments, analysis_params={})
-        if 'metadatadiff' in analysis:
-            analysis['metadatadiff'] = VideoMetaDiff(analysis['metadatadiff'])
         if 'videomasks' in analysis:
             analysis['videomasks'] = VideoMaskSetInfo(analysis['videomasks'])
         if 'errors' in analysis:
             analysis['errors'] = VideoMaskSetInfo(analysis['errors'])
         return startIm, destIm, mask, analysis
-
-    def _constructDonorMask(self, startFileName, destFileName, start, destination, scModel,
-                            invert=False, arguments={}):
-        """
-          Used for Donor video or images, the mask recording a 'donation' is the inversion of the difference
-          of the Donor image and its parent, it exists.
-          Otherwise, the donor image mask is the donor image (minus alpha channels):
-        """
-        predecessors = scModel.G.predecessors(destination)
-        errors = []
-        for pred in predecessors:
-            edge = scModel.G.get_edge(pred, destination)
-            op = scModel.gopLoader.getOperationWithGroups(edge['op'])
-            if op is not None and 'checkSIFT' in op.rules:
-                return video_tools.interpolateMask(
-                    os.path.join(scModel.G.dir, shortenName(start + '_' + destination, '_mask')),
-                    scModel.G.dir,
-                    edge['videomasks'],
-                    startFileName,
-                    destFileName,
-                    arguments=arguments)
-        return [], errors
 
     def compareImages(self, start, destination, scModel, op, invert=False, arguments={},
                       skipDonorAnalysis=False, analysis_params={}):
@@ -632,13 +622,139 @@ class VideoVideoLinkTool(LinkTool):
         mask, analysis = ImageWrapper(
             np.zeros((startIm.image_array.shape[0], startIm.image_array.shape[1])).astype('uint8')), {}
         operation = scModel.gopLoader.getOperationWithGroups(op, fake=True)
-        if op != 'Donor' and operation.generateMask != "all":
-            maskSet = list()
-            errors = list()
-        elif op == 'Donor':
-            maskSet, errors = self._constructDonorMask(startFileName, destFileName,
-                                                       start, destination, scModel, invert=invert,
+        maskSet = video_tools.formMaskDiffForImage(startFileName, destIm,
+                                                       os.path.join(scModel.G.dir, start + '_' + destination),
+                                                       op,
+                                                       startSegment=getMilliSecondsAndFrameCount(arguments[
+                                                                                                     'Start Time']) if 'Start Time' in arguments else None,
+                                                       endSegment=getMilliSecondsAndFrameCount(arguments[
+                                                                                                   'End Time']) if 'End Time' in arguments else None,
+                                                       analysis=analysis,
+                                                       alternateFunction=operation.getVideoCompareFunction(),
+                                                       #alternateFrameFunction=operation.getCompareFunction(),
                                                        arguments=consolidate(arguments, analysis_params))
+        # for now, just save the first mask
+        if len(maskSet) > 0 and video_tools.get_mask_from_segment( maskSet[0] ) is not None:
+            mask = ImageWrapper(video_tools.get_mask_from_segment( maskSet[0] ))
+            for item in maskSet:
+                video_tools.drop_mask_from_segment(item)
+        analysis['masks count'] = len(maskSet)
+        analysis['videomasks'] = maskSet
+        metaDataDiff = None
+        analysis = analysis if analysis is not None else {}
+        analysis['metadatadiff'] = metaDataDiff
+        analysis['shape change'] = sizeDiff(startIm, destIm)
+        self._addAnalysis(startIm, destIm, op, analysis, mask, linktype='video.video',
+                          arguments=consolidate(arguments, analysis_params),
+                          start=start, end=destination, scModel=scModel)
+        return mask, analysis, []
+
+
+class CollectionImageLinkTool(VideoImageLinkTool):
+    """
+    Supports mask construction and meta-data comparison when linking zip to image.
+    """
+    def __init__(self):
+        VideoImageLinkTool.__init__(self)
+
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.donothing_stream_processor"
+
+    def compare(self, start, end, scModel, arguments={}):
+        """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
+            Return both images, the mask set and the meta-data diff results
+        """
+        startIm, startFileName = scModel.getImageAndName(start)
+        destIm, destFileName = scModel.getImageAndName(end)
+        mask = np.ones((destIm.size[0],destIm.size[1]),dtype=np.uint8)*255
+        return startIm, destIm, ImageWrapper(mask), {}
+
+    def compareImages(self, start, destination, scModel, op, invert=False, arguments={},
+                      skipDonorAnalysis=False, analysis_params={}):
+
+        """
+
+        :param start:
+        :param destination:
+        :param scModel:
+        :param op:
+        :param invert:
+        :param arguments:
+        :param skipDonorAnalysis:
+        :param analysis_params:
+        :return:
+        @type start: str
+        @type destination: str
+        @type scModel: ImageProjectModel
+        @type op: str
+        @type invert: bool
+        @type arguments: dict
+        """
+        startIm, destIm, mask, analysis = self.compare(start, destination, scModel)
+        return mask, analysis, []
+
+class VideoVideoLinkTool(LinkTool):
+    """
+     Supports mask construction and meta-data comparison when linking video to video.
+     """
+
+    def __init__(self):
+        LinkTool.__init__(self)
+
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.video_without_audio_donor"
+
+    def compare(self, start, end, scModel, arguments={}):
+        """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
+            Return both images, the mask set and the meta-data diff results
+        """
+        startIm, startFileName = scModel.getImageAndName(start)
+        destIm, destFileName = scModel.getImageAndName(end)
+        mask, analysis, errors = self.compareImages(start, end, scModel, 'noOp',
+                                                    arguments=arguments, analysis_params={})
+        if 'metadatadiff' in analysis:
+            analysis['metadatadiff'] = VideoMetaDiff(analysis['metadatadiff'])
+        if 'videomasks' in analysis:
+            analysis['videomasks'] = VideoMaskSetInfo(analysis['videomasks'])
+        if 'errors' in analysis:
+            analysis['errors'] = VideoMaskSetInfo(analysis['errors'])
+        return startIm, destIm, mask, analysis
+
+    def compareImages(self, start, destination, scModel, op, invert=False, arguments={},
+                      skipDonorAnalysis=False, analysis_params={}):
+
+        """
+
+        :param start:
+        :param destination:
+        :param scModel:
+        :param op:
+        :param invert:
+        :param arguments:
+        :param skipDonorAnalysis:
+        :param analysis_params:
+        :return:
+        @type start: str
+        @type destination: str
+        @type scModel: ImageProjectModel
+        @type op: str
+        @type invert: bool
+        @type arguments: dict
+        """
+        startIm, startFileName = scModel.getImageAndName(start)
+        destIm, destFileName = scModel.getImageAndName(destination)
+        mask, analysis = ImageWrapper(
+            np.zeros((startIm.image_array.shape[0], startIm.image_array.shape[1])).astype('uint8')), {}
+        operation = scModel.gopLoader.getOperationWithGroups(op, fake=True)
+        if op != 'Donor' and operation.generateMask not in ['audio', 'all']:
+            maskSet = video_tools.getMaskSetForEntireVideo(video_tools.FileMetaDataLocator(startFileName))
+            if maskSet is None:
+                maskSet = list()
+            errors = list()
+        elif op == 'Donor' and not skipDonorAnalysis:
+            errors = list()
+            maskSet = self.processDonors(scModel, start, destination, startIm, startFileName, destIm, destFileName,
+                                          consolidate(arguments, analysis_params), invert=invert)
         else:
             maskSet, errors = video_tools.formMaskDiff(startFileName, destFileName,
                                                        os.path.join(scModel.G.dir, start + '_' + destination),
@@ -649,16 +765,18 @@ class VideoVideoLinkTool(LinkTool):
                                                                                                    'End Time']) if 'End Time' in arguments else None,
                                                        analysis=analysis,
                                                        alternateFunction=operation.getVideoCompareFunction(),
+                                                       #alternateFrameFunction=operation.getCompareFunction(),
                                                        arguments=consolidate(arguments, analysis_params))
-        # for now, just save the first mask
-        if len(maskSet) > 0 and 'mask' in maskSet[0]:
-            mask = ImageWrapper(maskSet[0]['mask'])
-            for item in maskSet:
-                item.pop('mask')
+        mask = None
+        for item in maskSet:
+            if video_tools.get_mask_from_segment(item) is not None:
+                mask = ImageWrapper(video_tools.get_mask_from_segment(item))
+                video_tools.drop_mask_from_segment(item)
+        if mask is None:
+            mask = ImageWrapper(np.ones(startIm.image_array.shape[0:2], dtype='uint8')*255)
         analysis['masks count'] = len(maskSet)
         analysis['videomasks'] = maskSet
-        metaDataDiff = video_tools.formMetaDataDiff(startFileName, destFileName,
-                                                    frames=operation.generateMask in ["all", "frames"])
+        metaDataDiff = video_tools.form_meta_data_diff(startFileName, destFileName)
         analysis = analysis if analysis is not None else {}
         analysis['metadatadiff'] = metaDataDiff
         analysis['shape change'] = sizeDiff(startIm, destIm)
@@ -667,14 +785,45 @@ class VideoVideoLinkTool(LinkTool):
                           start=start, end=destination, scModel=scModel)
         return mask, analysis, errors
 
+    def addSubstituteMasks(self,start, destination, scModel, op, arguments={}, filename=''):
+        startIm, startFileName = scModel.getImageAndName(start)
+        destIm, destFileName = scModel.getImageAndName(destination)
+        startSegment = getMilliSecondsAndFrameCount(arguments[
+                                                        'Start Time']) if 'Start Time' in arguments else None
+        endSegment = getMilliSecondsAndFrameCount(arguments[
+                                                      'End Time']) if 'End Time' in arguments else None
+        subs = video_tools.formMaskForSource(startFileName,
+                                             filename,
+                                             start + '_' + destination + '_substitute',
+                                             startTimeandFrame=startSegment,
+                                             stopTimeandFrame=endSegment
+                                             )
+        #if subs is not None:
+        #    analysis = {}
+        #    startIm, startFileName = scModel.getImageAndName(start)
+        #    destIm, destFileName = scModel.getImageAndName(destination)
+        #    maskSet, errors = video_tools.formMaskDiff(startFileName, destFileName,
+        #                                               os.path.join(scModel.G.dir, start + '_' + destination + '_cmp'),
+        #                                               op,
+        #                                               startSegment=startSegment,
+        #                                               endSegment=endSegment,
+        #                                               analysis=analysis,
+        #                                               alternateFunction=video_tools.maskCompare,
+        #                                               arguments=arguments)
+        # how best to compare
+        return subs
 
-class AudioVideoLinkTool(LinkTool):
+
+class AudioVideoLinkTool(VideoVideoLinkTool):
     """
      Supports mask construction and meta-data comparison when linking audio to video.
      """
 
     def __init__(self):
-        LinkTool.__init__(self)
+        VideoVideoLinkTool.__init__(self)
+
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.all_audio_processor"
 
     def compare(self, start, end, scModel, arguments={}):
         """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
@@ -708,13 +857,16 @@ class AudioVideoLinkTool(LinkTool):
         analysis = dict()
         analysis['masks count'] = 0
         analysis['videomasks'] = list()
-        metaDataDiff = video_tools.formMetaDataDiff(startFileName, destFileName)
+        metaDataDiff = video_tools.form_meta_data_diff(startFileName, destFileName, frames=False, media_types=['audio'])
         analysis = analysis if analysis is not None else {}
         analysis['metadatadiff'] = metaDataDiff
         operation = scModel.gopLoader.getOperationWithGroups(op, fake=True)
         errors = []
-
-        if op != 'Donor' and operation.generateMask == 'all':
+        if op == 'Donor':
+            errors = list()
+            maskSet = self.processDonors(scModel, start, destination, startIm, startFileName, destIm, destFileName,
+                                      consolidate(arguments, analysis_params), invert=invert)
+        elif op != 'Donor' and operation.generateMask in ['audio','all']:
             maskSet, errors = video_tools.formMaskDiff(startFileName, destFileName,
                                                        os.path.join(scModel.G.dir, start + '_' + destination),
                                                        op,
@@ -725,9 +877,15 @@ class AudioVideoLinkTool(LinkTool):
                                                        analysis=analysis,
                                                        alternateFunction=operation.getVideoCompareFunction(),
                                                        arguments=consolidate(arguments, analysis_params))
+        else:
+            maskSet = video_tools.getMaskSetForEntireVideo(
+                video_tools.FileMetaDataLocator(startFileName), media_types=['audio'])
+            if maskSet is None:
+                maskSet = list()
+                errors = list()
 
-            analysis['masks count'] = len(maskSet)
-            analysis['videomasks'] = maskSet
+        analysis['masks count'] = len(maskSet)
+        analysis['videomasks'] = maskSet
         self._addAnalysis(startIm, destIm, op, analysis, None, linktype='audio.audio',
                           arguments=consolidate(arguments, analysis_params),
                           start=start, end=destination, scModel=scModel)
@@ -752,6 +910,9 @@ class VideoAudioLinkTool(LinkTool):
     def __init__(self):
         LinkTool.__init__(self)
 
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.all_audio_processor"
+
     def compare(self, start, end, scModel, arguments={}):
         """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
             Return both images, the mask set and the meta-data diff results
@@ -772,7 +933,7 @@ class VideoAudioLinkTool(LinkTool):
         analysis = dict()
         analysis['masks count'] = 0
         analysis['videomasks'] = list()
-        metaDataDiff = video_tools.formMetaDataDiff(startFileName, destFileName)
+        metaDataDiff = video_tools.form_meta_data_diff(startFileName, destFileName, frames=False, media_types=['audio'])
         analysis = analysis if analysis is not None else {}
         analysis['metadatadiff'] = metaDataDiff
         self._addAnalysis(startIm, destIm, op, analysis, None, linktype='video.audio',
@@ -789,35 +950,21 @@ class ImageVideoLinkTool(VideoVideoLinkTool):
     def __init__(self):
         VideoVideoLinkTool.__init__(self)
 
+    def getDefaultDonorProcessor(self):
+        return "maskgen.masks.donor_rules.alpha_stream_processor"
+
     def compareImages(self, start, destination, scModel, op, invert=False, arguments={},
                       skipDonorAnalysis=False, analysis_params={}):
         startIm, startFileName = scModel.getImageAndName(start)
         destIm, destFileName = scModel.getImageAndName(destination)
-        mask, analysis = ImageWrapper(
-            np.zeros((startIm.image_array.shape[0], startIm.image_array.shape[1])).astype('uint8')), {}
-        maskSet = []
-        errors = list()
+        mask = ImageWrapper(
+            np.zeros((startIm.image_array.shape[0], startIm.image_array.shape[1])).astype('uint8'))
         if op == 'Donor':
-            maskSet, errors = self._constructDonorMask(startFileName,
-                                                       destFileName,
-                                                       start,
-                                                       destination,
-                                                       scModel,
-                                                       invert=invert,
-                                                       arguments=consolidate(arguments,
-                                                                             analysis_params))
-        # for now, just save the first mask
-        if len(maskSet) > 0:
-            mask = ImageWrapper(maskSet[0]['mask'])
-            for item in maskSet:
-                item.pop('mask')
-        analysis['masks count'] = len(maskSet)
-        analysis['videomasks'] = maskSet
-        analysis = analysis if analysis is not None else {}
-        self._addAnalysis(startIm, destIm, op, analysis, mask, linktype='image.video',
-                          arguments=consolidate(arguments, analysis_params),
-                          start=start, end=destination, scModel=scModel)
-        return mask, analysis, errors
+            mask = self.processDonors(scModel, start, destination, startIm, startFileName, destIm, destFileName,
+                                      consolidate(arguments, analysis_params), invert=invert)
+            if mask is None:
+                mask = startIm.to_mask().invert()
+        return mask, {}, ()
 
 
 class ImageZipAudioLinkTool(VideoAudioLinkTool):
@@ -861,11 +1008,32 @@ class AddTool:
 
 class VideoAddTool(AddTool):
     def getAdditionalMetaData(self, media):
-        meta = video_tools.getMeta(media,show_streams=True)[0]
-        if (type(meta)) == list and len(meta) > 0:
-            meta = meta[0]
-        meta['shape'] = video_tools.getShape(media)
-        return meta
+        parent = {}
+        meta, frames = ffmpeg_api.get_meta_from_video(media, show_streams=True, with_frames=True, frame_limit=30, frame_meta=['pkt_duration_time'],media_types=['video'])
+        indices = ffmpeg_api.get_stream_indices_of_type(meta, 'video')
+        if indices:
+            if_vfr = ffmpeg_api.is_vfr(meta[indices[0]], frames=frames[indices[0]])
+        else:
+            if_vfr = False
+        meta, _ = ffmpeg_api.get_meta_from_video(media, show_streams=True,
+                                                      frame_meta=['pkt_duration_time'])
+        parent['media'] = meta
+        width = 0
+        height = 0
+        rotation = 0
+        for item in meta:
+            if 'width' in item:
+                width = int(item['width'])
+            if 'height' in item:
+                height = int(item['height'])
+            if 'rotation' in item:
+                rotation = int(item['rotation'])
+        parent['shape'] = (width, height)
+        parent['rotation'] = rotation
+        meta[indices[0]]['is_vfr'] = if_vfr
+        # redundant but requested by NIST
+        parent['is_vfr'] = if_vfr
+        return parent
 
 class ZipAddTool(AddTool):
     def getAdditionalMetaData(self, media):
@@ -880,14 +1048,23 @@ class OtherAddTool(AddTool):
     def getAdditionalMetaData(self, media):
         return {}
 
-
-addTools = {'video': VideoAddTool(), 'zip':ZipAddTool(),'audio': OtherAddTool(), 'image': OtherAddTool()}
+addTools = {
+             'video': VideoAddTool(),
+             'zip':ZipAddTool(),
+             'collection': OtherAddTool(),
+             'audio': OtherAddTool(),
+             'image': OtherAddTool()
+            }
 linkTools = {'image.image': ImageImageLinkTool(), 'video.video': VideoVideoLinkTool(),
              'image.video': ImageVideoLinkTool(), 'video.image': VideoImageLinkTool(),
              'video.audio': VideoAudioLinkTool(), 'audio.video': AudioVideoLinkTool(),
              'audio.audio': AudioAudioLinkTool(), 'zip.video':ImageZipVideoLinkTool(),
-             'zip.audio': ImageZipAudioLinkTool()}
+             'collection.image': CollectionImageLinkTool(),
+             'zip.image':   ZipImageLinkTool(),   'zip.audio': ImageZipAudioLinkTool()}
 
+
+def true_notify(object, message, **kwargs):
+    return True
 
 class ImageProjectModel:
     """
@@ -918,16 +1095,28 @@ class ImageProjectModel:
     """
     lock = Lock()
 
-    def __init__(self, projectFileName, graph=None, importImage=False, notify=None, baseImageFileName=None):
-        self.notify = notify
+    def __init__(self, projectFileName, graph=None, notify=None,
+                 baseImageFileName=None, username=None,tool=None):
+        self.probeMaskMemory = DummyMemory(None)
+        if notify is not None:
+            self.notify = notifiers.NotifyDelegate(
+                [notify, notifiers.QaNotifier(self), notifiers.ValidationNotifier(total_errors=None)])
+        else:
+            self.notify = notifiers.NotifyDelegate([true_notify])
         if graph is not None:
             graph.arg_checker_callback = self.__scan_args_callback
         # Group Operations are tied to models since
         # group operations are created by a local instance and stored in the graph model
         # when used.
-        self.gopLoader = GroupOperationsLoader()
-        self._setup(projectFileName, graph=graph, baseImageFileName=baseImageFileName)
 
+        self.gopLoader = GroupOperationsLoader()
+        self.username = username if username is not None else get_username()
+        self._setup(projectFileName, graph=graph, baseImageFileName=baseImageFileName,tool=tool)
+
+
+    def set_notifier(self, notifier):
+        self.notify = notifiers.NotifyDelegate(
+            [notifier, notifiers.QaNotifier(self), notifiers.ValidationNotifier(total_errors=None)])
 
     def get_dir(self):
         return self.G.dir
@@ -936,7 +1125,7 @@ class ImageProjectModel:
         return self.gopLoader
 
     def addImagesFromDir(self, dir, baseImageFileName=None, xpos=100, ypos=30, suffixes=list(),
-                         sortalg=lambda s: s.lower()):
+                         sortalg=lambda s: s.lower(),preferences={}):
         """
           Bulk add all images from a given directory into the project.
           Position the images in a grid, separated by 50 vertically with a maximum height of 520.
@@ -946,44 +1135,54 @@ class ImageProjectModel:
         """
         initialYpos = ypos
         totalSet = []
+        suffixes = set(suffixes)
         for suffix in suffixes:
+            suffix_lower = suffix.lower()
             totalSet.extend([filename for filename in os.listdir(dir) if
-                             filename.lower().endswith(suffix) and \
+                             filename.lower().endswith(suffix_lower ) and \
                              not filename.endswith('_mask' + suffix) and \
                              not filename.endswith('_proxy' + suffix)])
         totalSet = sorted(totalSet, key=sortalg)
-        added = 0
+        added = []
         for filename in totalSet:
             try:
                 pathname = os.path.abspath(os.path.join(dir, filename))
                 additional = self.getAddTool(pathname).getAdditionalMetaData(pathname)
+                additional.update(preferences)
                 nname = self.G.add_node(pathname, xpos=xpos, ypos=ypos, nodetype='base', **additional)
+                added.append(nname)
                 ypos += 50
                 if ypos == 450:
                     ypos = initialYpos
                     xpos += 50
-                added=True
                 if filename == baseImageFileName:
                     self.start = nname
                     self.end = None
             except Exception as ex:
                 logging.getLogger('maskgen').warn('Failed to add media file {}'.format(filename))
-        if added and self.notify is not None:
-            self.notify((self.start, None), 'add')
+        self.notify(added, 'add')
 
 
-    def addImage(self, pathname, cgi=False):
-        maxx = max(
-            [self.G.get_node(node)['xpos'] for node in self.G.get_nodes() if 'xpos' in self.G.get_node(node)] + [50])
-        maxy = max(
-            [self.G.get_node(node)['ypos'] for node in self.G.get_nodes() if 'ypos' in self.G.get_node(node)] + [50])
+    def addImage(self, pathname, cgi=False, prnu=False, **kwargs):
+        maxx = 50
+        max_node = None
+        for node_id in self.G.get_nodes():
+            node = self.G.get_node(node_id)
+            if 'xpos' in node and int(node['xpos']) > maxx:
+                maxx = int(node['xpos'])
+                max_node = node
+        maxy = max_node['ypos'] + 50 if max_node is not None else 50
         additional = self.getAddTool(pathname).getAdditionalMetaData(pathname)
-        nname = self.G.add_node(pathname, nodetype='base', cgi='yes' if cgi else 'no', xpos=maxx + 75, ypos=maxy,
+        additional.update(kwargs)
+        nname = self.G.add_node(pathname, nodetype='base',
+                                cgi='yes' if cgi else 'no',
+                                xpos=maxx,
+                                ypos=maxy,
+                                prnu='yes' if prnu else 'no',
                                 **additional)
         self.start = nname
         self.end = None
-        if self.notify is not None:
-            self.notify((self.start, None), 'add')
+        self.notify([self.start], 'add')
         return nname
 
     def getEdgesBySemanticGroup(self):
@@ -1005,6 +1204,7 @@ class ImageProjectModel:
         self.notify((self.start, self.end), 'update_edge')
 
     def update_node(self, node_properties):
+        deleteImage(self.getStartImageFile())
         self.G.update_node(self.start, **node_properties)
 
     def update_edge(self, mod):
@@ -1013,7 +1213,18 @@ class ImageProjectModel:
         :return:
         @type mod: Modification
         """
-        mod_old = self.getModificationForEdge(self.start, self.end, self.G.get_edge(self.start, self.end))
+        op = self.gopLoader.getOperationWithGroups(mod.operationName,fake=True)
+        mod_old = self.getModificationForEdge(self.start, self.end)
+
+        trigger_update = False
+        for k,v in mod.arguments.iteritems():
+            if (k not in mod_old.arguments or mod_old.arguments[k] != v) and \
+                k in op.getTriggerUpdateArguments():
+                trigger_update = True
+        for k in mod_old.arguments:
+            if k not in mod.arguments and \
+                k in op.getTriggerUpdateArguments():
+                trigger_update = True
 
         self.G.update_edge(self.start, self.end,
                            op=mod.operationName,
@@ -1026,8 +1237,12 @@ class ImageProjectModel:
                            softwareName=('' if mod.software is None else mod.software.name),
                            softwareVersion=('' if mod.software is None else mod.software.version),
                            inputmaskname=mod.inputMaskName)
-        self.notify((self.start, self.end), 'update_edge')
         self._save_group(mod.operationName)
+
+        if trigger_update:
+            self.reproduceMask(force=False)
+        else:
+            self.notify((self.start, self.end), 'update_edge')
 
     def compare(self, destination, arguments={}):
         """ Compare the 'start' image node to the image node with the name in the  'destination' parameter.
@@ -1042,7 +1257,7 @@ class ImageProjectModel:
         e = self.G.get_edge(self.start, self.end)
         if e is None:
             return None
-        videodiff = VideoMetaDiff(e['metadatadiff']) if 'metadatadiff' in e else None
+        videodiff = VideoMetaDiff(e['metadatadiff']) if getValue(e,'metadatadiff',None) is not None else None
         imagediff = MetaDiff(e['exifdiff']) if 'exifdiff' in e and len(e['exifdiff']) > 0 else None
         return imagediff if imagediff is not None else videodiff
 
@@ -1076,13 +1291,13 @@ class ImageProjectModel:
                          len(self.G.successors(node)) == 0 and len(self.G.predecessors(node)) > 0]
         return [(node, self._findBaseNodes(node)) for node in terminalNodes]
 
-    def getEdges(self, endNode):
+    def getEdges(self, endNode,excludeDonor=True):
         """
 
         :param endNode: (identifier)
         :return: tuple (start, end, edge map) for all edges ending in endNode
         """
-        return self._findEdgesWithCycleDetection(endNode, excludeDonor=True, visitSet=list())
+        return self._findEdgesWithCycleDetection(endNode, excludeDonor=excludeDonor, visitSet=list())
 
     def getNodeNames(self):
         return self.G.get_nodes()
@@ -1129,7 +1344,7 @@ class ImageProjectModel:
 
         compressor = prefLoader.get_key('compressor.' + ftype,
                                         default_value=defaults['compressor.' + ftype])
-        if ('compressed' in node and node['compressed'] == compressor):
+        if 'compressed' in node:
             return
 
         func = getRule(compressor)
@@ -1139,6 +1354,7 @@ class ImageProjectModel:
             if newfilename is not None:
                 newfile = os.path.split(newfilename)[1]
                 node['file'] = newfile
+                node['compressed'] = compressor
         return newfile
 
     def connect(self, destination, mod=Modification('Donor', '',category='Donor'), invert=False, sendNotifications=True,
@@ -1149,69 +1365,37 @@ class ImageProjectModel:
              Return an error message on failure, otherwise return None
         """
         if self.start is None:
-            return "Node node selected", False
-        if not self.G.has_node(destination):
-            return "Canvas out of state from model.  Node Missing.", False
-        if self.findChild(destination, self.start):
-            return "Cannot connect to ancestor node", False
-        for suc in self.G.successors(self.start):
-            if suc == destination:
-                return "Cannot connect to the same node twice", False
-        return self._connectNextImage(destination, mod, invert=invert, sendNotifications=sendNotifications,
-                                      skipDonorAnalysis=skipDonorAnalysis)
+            return ValidationMessage(Severity.ERROR,
+                                     self.start,
+                                     self.end,
+                                     Message="Node node selected",
+                                     Module=''), False
+        elif not self.G.has_node(destination):
+            return ValidationMessage(Severity.ERROR,
+                                     self.start,
+                                     self.end,
+                                     Message="Canvas out of state from model. Node Missing.",
+                                     Module=''), False
+        elif self.findChild(destination, self.start):
+            return ValidationMessage(Severity.ERROR,
+                                     self.start,
+                                     self.end,
+                                     Message="Cannot connect to ancestor node",
+                                     Module=''), False
+        else:
+            for successor in self.G.successors(self.start):
+                if successor == destination:
+                    return ValidationMessage(Severity.ERROR,
+                                                    self.start,
+                                                    self.end,
+                                                    Message="Cannot connect to the same node twice",
+                                                    Module=''), False
 
-    def getProbeSetWithoutComposites(self, inclusionFunction=mask_rules.isEdgeLocalized, saveTargets=True, graph=None, constructDonors=True):
-        """
-        :param inclusionFunction: filter out edges to not include in the probe set
-        :param saveTargets: save the result images as files
-        :return: The set of probes
-        @rtype: list of Probe
-        """
-        self._executeSkippedComparisons()
-        probes = list()
-        useGraph = graph if graph is not None else self.G
-        for edge_id in useGraph.get_edges():
-            edge = useGraph.get_edge(edge_id[0], edge_id[1])
-            if inclusionFunction(edge_id, edge, self.gopLoader.getOperationWithGroups(edge['op'],fake=True)):
-                composite_generator =  mask_rules.prepareComposite(edge_id, useGraph, self.gopLoader)
-                probes.extend(composite_generator.constructProbes(saveTargets=saveTargets,
-                                                                  inclusionFunction=inclusionFunction,
-                                                                  constructDonors=constructDonors))
-        return probes
-
-    def getProbeSet(self, inclusionFunction=mask_rules.isEdgeLocalized, saveTargets=True,
-                    compositeBuilders=[ColorCompositeBuilder],
-                    graph=None,
-                    replacement_probes=None):
-        """
-        Builds composites and donors.
-        :param skipComputation: skip donor and composite construction, updating graph
-        :param inclusionFunction: a function returning True/False that takes an edge as argument
-        :return: list if Probe
-        @type operationTypes: list of str
-        @type inclusionFunction: (tuple, dict) -> bool
-        @rtype: list of Probe
-        """
-        self.assignColors()
-        probes = replacement_probes if replacement_probes is not None else \
-            self.getProbeSetWithoutComposites(inclusionFunction=inclusionFunction, saveTargets=saveTargets,graph=graph)
-        probes = sorted(probes, key=lambda probe: probe.level)
-        localCompositeBuilders = [cb() for cb in compositeBuilders]
-        for compositeBuilder in localCompositeBuilders:
-            compositeBuilder.initialize(self.G, probes)
-        maxpass = max([compositeBuilder.passes for compositeBuilder in localCompositeBuilders])
-        composite_bases = dict()
-        for passcount in range(maxpass):
-            for probe in probes:
-                if probe.targetMaskImage is None:
-                    continue
-                composite_bases[probe.finalNodeId] = probe.targetBaseNodeId
-                edge = self.G.get_edge(probe.edgeId[0], probe.edgeId[1])
-                for compositeBuilder in localCompositeBuilders:
-                    compositeBuilder.build(passcount, probe, edge)
-        for compositeBuilder in localCompositeBuilders:
-            compositeBuilder.finalize(probes)
-        return probes
+            return self._connectNextImage(destination,
+                                          mod,
+                                          invert=invert,
+                                          sendNotifications=sendNotifications,
+                                          skipDonorAnalysis=skipDonorAnalysis)
 
     def getPredecessorNode(self):
         if self.end is None:
@@ -1228,6 +1412,18 @@ class ImageProjectModel:
                 return self.getBaseNode(pred)
         return node
 
+    def getCreatingOperation(self, destination):
+        """
+        :return: operation for the manipulation that created this destination and the start node
+        @rtype: (str,Operation)
+        """
+        predecessors = self.G.predecessors(destination)
+        for pred in predecessors:
+            pred_edge = self.G.get_edge(pred, destination)
+            edge_op = self.gopLoader.getOperationWithGroups(pred_edge['op'])
+            if edge_op is not None and pred_edge['op'] != 'Donor':
+                return pred, edge_op
+
     def getDonorAndBaseImage(self):
         """
          Get the donor image and associated baseImage for the selected node.
@@ -1242,7 +1438,7 @@ class ImageProjectModel:
                 for donortuple in donors:
                     if donortuple.base == x[1]:
                         if donortuple.media_type == 'video':
-                            return getSingleFrameFromMask(donortuple.mask_wrapper), baseImage
+                            return video_tools.getSingleFrameFromMask(donortuple.mask_wrapper), baseImage
                         elif donortuple.media_type == 'audio':
                             return None, None
                         else:
@@ -1251,48 +1447,11 @@ class ImageProjectModel:
 
     def getTransformedMask(self):
         """
-        :return: list a mask transfomed to all final image nodes
+        :return: list of CompositeImage
         """
-        composite_generator = mask_rules.prepareComposite((self.start, self.end),self.G, self.gopLoader)
-        return composite_generator.constructComposites()
+        composite_generator = mask_rules.prepareComposite((self.start, self.end),self.G, self.gopLoader, self.probeMaskMemory)
+        return composite_generator.constructComposites(checkEmptyMask=False)
 
-    def extendCompositeByOne(self, probes, start=None, override_args={}):
-        """
-        :param compositeMask:
-        :param level:
-        :param replacementEdgeMask:
-        :param colorMap:
-        :param override_args:
-        :return:
-        @type compositeMask: ImageWrapper
-        @type level: IntObject
-        @type replacementEdgeMask: ImageWrapper
-        @rtype ImageWrapper
-        """
-        results = mask_rules.findBaseNodesWithCycleDetection(self.G, start if start is not None else \
-            (self.end if self.end is not None else self.start))
-        if len(results) == 0:
-            return
-        nodeids = results[0][2]
-        graph = self.G.subgraph(nodeids)
-        composite_generator = mask_rules.prepareComposite((self.start,self.end), graph, self.gopLoader)
-        probes = composite_generator.extendByOne(probes,self.start,self.end,override_args=override_args)
-        return self.getProbeSet(replacement_probes=probes)
-
-    def constructPathProbes(self, start=None):
-        """
-         Construct the composite mask for the selected node.
-         Does not save the composite in the node.
-         Returns the composite mask if successful, otherwise None
-        """
-        results = mask_rules.findBaseNodesWithCycleDetection(self.G, start if start is not None else \
-            (self.end if self.end is not None else self.start))
-        if len(results) == 0:
-            return
-        nodeids = results[0][2]
-        graph = self.G.subgraph(nodeids)
-        probes = self.getProbeSet(graph=graph,saveTargets=False)
-        return probes
 
     def executeFinalNodeRules(self):
         terminalNodes = [node for node in self.G.get_nodes() if
@@ -1313,9 +1472,29 @@ class ImageProjectModel:
         for edge_id in self.G.get_edges():
             if self.start is not None and self.start != edge_id[1]:
                 continue
-            composite_generator = mask_rules.prepareComposite(edge_id, self.G, self.gopLoader)
+            composite_generator = mask_rules.prepareComposite(edge_id, self.G, self.gopLoader, self.probeMaskMemory)
             return composite_generator.constructDonors(saveImage=False)
         return []
+
+    def invertInputMask(self):
+        """
+        Temporary: Add missing input masks
+        :return:
+        """
+        if self.start is not None and self.end is not None:
+            start_im = self.startImage()
+            edge = self.G.get_edge(self.start, self.end)
+            if edge is not None:
+                maskname= getValue(edge,'inputmaskname')
+                if maskname is not None:
+                    mask = openImageMaskFile(self.get_dir(),maskname)
+                    if mask is not None:
+                        expected_shape = start_im.image_array.shape[0:2]
+                        if expected_shape != mask.shape:
+                            mask = cv2.resize(mask,tuple(reversed(expected_shape)))
+                        mask = ImageWrapper(mask)
+                        mask = mask.invert()
+                        mask.save(os.path.join(self.get_dir(),maskname))
 
     def fixInputMasks(self):
         """
@@ -1328,7 +1507,7 @@ class ImageProjectModel:
                 startimage, name = self.G.get_image(edge_id[0])
                 finalimage, fname = self.G.get_image(edge_id[1])
                 mask = self.G.get_edge_image(edge_id[0], edge_id[1], 'maskname')
-                inputmaskname = name[0:name.rfind('.')] + '_inputmask.png'
+                inputmaskname = os.path.splitext(name)[0]+ '_inputmask.png'
                 ImageWrapper(composeCloneMask(mask, startimage, finalimage)).save(inputmaskname)
                 #                if 'arguments' not in edge:
                 #                    edge['arguments'] = {}
@@ -1344,7 +1523,8 @@ class ImageProjectModel:
         for nodeid in self.G.get_nodes():
             node = self.G.get_node(nodeid)
             if 'nodetype' in node and node['nodetype'] == 'base':
-                self.getGraph().set_name(node['file'][0:node['file'].rfind('.')])
+                pos = node['file'].find('.')
+                self.getGraph().set_name(node['file'][:pos] if pos > 0 else node['file'])
                 break
 
     def addNextImage(self, pathname, invert=False, mod=Modification('', ''), sendNotifications=True, position=(50, 50),
@@ -1353,7 +1533,7 @@ class ImageProjectModel:
              Connect the new image node to the end of the currently selected edge.  A node is selected, not an edge, then connect
              to the currently selected node.  Create the mask, inverting the mask if requested.
              Send a notification to the register caller if requested.
-             Return an error message on failure, otherwise return None
+             Return a list of validation messages on failure, otherwise return None
         """
         if (self.end is not None):
             self.start = self.end
@@ -1364,15 +1544,23 @@ class ImageProjectModel:
         for k, v in self.getAddTool(pathname).getAdditionalMetaData(pathname).iteritems():
             params[k] = v
         destination = self.G.add_node(pathname, seriesname=self.getSeriesName(), **params)
+        self.notify([destination],'add')
         analysis_params = dict({ k:v for k,v in edge_parameters.iteritems() if v is not None})
-        msg, status = self._connectNextImage(destination, mod, invert=invert, sendNotifications=sendNotifications,
+        msgs, status = self._connectNextImage(destination, mod, invert=invert, sendNotifications=sendNotifications,
                                              skipRules=skipRules, analysis_params=analysis_params)
-        return msg, status
+        return msgs, status
 
     def getLinkType(self, start, end):
         return self.getNodeFileType(start) + '.' + self.getNodeFileType(end)
 
     def getLinkTool(self, start, end):
+        """
+
+        :param start:
+        :param end:
+        :return:
+        @rtype: LinkTool
+        """
         return linkTools[self.getLinkType(start, end)]
 
     def mergeProject(self, project):
@@ -1389,12 +1577,12 @@ class ImageProjectModel:
         myfiles = dict()
         for nodeid in self.getGraph().get_nodes():
             mynode = self.getGraph().get_node(nodeid)
-            myfiles[mynode['file']] = (nodeid, md5offile(os.path.join(self.G.dir, mynode['file']),
-                                                         raiseError=False))
+            myfiles[mynode['file']] = (nodeid, md5_of_file(os.path.join(self.G.dir, mynode['file']),
+                                                           raiseError=False))
         for nodeid in project.getGraph().get_nodes():
             theirnode = project.getGraph().get_node(nodeid)
-            theirfilemd5 = md5offile(os.path.join(project.get_dir(), theirnode['file']),
-                                     raiseError=False)
+            theirfilemd5 = md5_of_file(os.path.join(project.get_dir(), theirnode['file']),
+                                       raiseError=False)
             if theirnode['file'] in myfiles:
                 if myfiles[theirnode['file']][1] != theirfilemd5:
                     logging.getLogger('maskgen').warn(
@@ -1424,14 +1612,17 @@ class ImageProjectModel:
         :return:
         @rtype : AddTool
         """
-        return addTools[fileType(media)]
+        ft = fileType(media)
+        if ft.startswith('zip'):
+            ft = 'zip'
+        return addTools[ft]
 
     def hasSkippedEdges(self):
         return len(self.G.getDataItem('skipped_edges', [])) > 0
 
 
-    def _executeQueue(self,q,results):
-        from Queue import Queue,Empty
+    def _executeQueue(self,q,results,tracker):
+        from Queue import Empty
         """
         :param q:
         :return:
@@ -1448,6 +1639,7 @@ class ImageProjectModel:
                     edge_data['end'],
                     edge_data['opName']
                 ))
+                tracker.next('{}->{}'.format(edge_data['start'], edge_data['end']))
                 if self.getGraph().has_node(edge_data['start']) and self.getGraph().has_node(edge_data['end']) and \
                     self.getGraph().has_edge(edge_data['start'],edge_data['end']):
                     mask, analysis, errors = self.getLinkTool(edge_data['start'], edge_data['end']).compareImages(
@@ -1459,7 +1651,7 @@ class ImageProjectModel:
                         skipDonorAnalysis=edge_data['skipDonorAnalysis'],
                         invert=edge_data['invert'],
                         analysis_params=edge_data['analysis_params'])
-                    maskname = shortenName(edge_data['start'] + '_' + edge_data['end'], '_mask.png', id=self.G.nextId())
+                    maskname = shortenName(edge_data['start'] + '_' + edge_data['end'], '_mask.png', identifier=self.G.nextId())
                     self.G.update_mask(edge_data['start'], edge_data['end'], mask=mask, maskname=maskname, errors=errors,
                                        **consolidate(analysis, edge_data['analysis_params']))
                 else:
@@ -1482,38 +1674,57 @@ class ImageProjectModel:
                     results.put(((edge_data['start'], edge_data['end']),False, [str(e)]))
         return
 
-    def _executeSkippedComparisons(self):
+    def _executeSkippedComparisons(self,status_cb=None):
         from Queue import Queue
         from threading import Thread
         allErrors = []
         completed = []
         q = Queue()
+        status = Queue()
         results = Queue()
         skipped_edges = self.G.getDataItem('skipped_edges', [])
         if len(skipped_edges) == 0:
             return
+        tracker_cb = status_cb
+        tracker_cb = lambda x : status.put(x) if tracker_cb is not None and int(skipped_threads) >= 2 else None
+        tracker = StatusTracker(module_name='Mask Generator',
+                                amount=len(skipped_edges),
+                                status_cb=tracker_cb)
         for edge_data in skipped_edges:
             q.put(edge_data)
         skipped_threads = prefLoader.get_key('skipped_threads', 2)
         logging.getLogger('maskgen').info('Recomputing {} masks with {} threads'.format(q.qsize(), skipped_threads))
         threads = list()
-        self._executeQueue(q, results)
-        for i in range(int(skipped_threads)):
-            t = Thread(target=self._executeQueue, name='skipped_edges' + str(i), args=(q,results))
-            threads.append(t)
-            t.start()
-        for thread in threads:
-            thread.join()
-        while not results.empty():
-            result = results.get_nowait()
-            allErrors.extend(result[2])
-            if result[1]:
-                completed.append(result[0])
+        try:
+            if int(skipped_threads) < 2:
+                self._executeQueue(q, results, tracker)
+            else:
+                for i in range(int(skipped_threads)):
+                    t = Thread(target=self._executeQueue, name='skipped_edges' + str(i), args=(q,results,tracker))
+                    threads.append(t)
+                    t.start()
+                if status_cb is not None:
+                    while not q.empty():
+                        try:
+                            message = status.get(timeout=5)
+                            if message is not None:
+                                status_cb(message)
+                        except:
+                            continue
+                for thread in threads:
+                    thread.join()
+            while not results.empty():
+                result = results.get_nowait()
+                allErrors.extend(result[2])
+                if result[1]:
+                    completed.append(result[0])
+        finally:
+            tracker.complete()
         self.G.setDataItem('skipped_edges',[edge_data for edge_data in skipped_edges if (edge_data['start'], edge_data['end']) not in completed])
         msg = os.linesep.join(allErrors).strip()
         return msg if len(msg) > 0 else None
 
-    def _compareImages(self, start, destination, opName, invert=False, arguments={}, skipDonorAnalysis=True,
+    def _compareImages(self, start, destination, opName, invert=False, arguments={}, skipDonorAnalysis=False,
                        analysis_params=dict(),
                        force=False):
         if prefLoader.get_key('skip_compare') and not force:
@@ -1537,29 +1748,55 @@ class ImageProjectModel:
                                                                        invert=invert,
                                                                        analysis_params=analysis_params)
 
-    def reproduceMask(self, skipDonorAnalysis=False,edge_id=None, analysis_params=dict()):
+    def reproduceMask(self, skipDonorAnalysis=False,edge_id=None, analysis_params=dict(), argument_params=dict(),
+                      force=True):
+        """
+
+        :param skipDonorAnalysis:
+        :param edge_id:
+        :param analysis_params:
+        :param argument_params:
+        :param force: If True, then force mask creation do not skip.
+        :return:
+        """
         mask_edge_id = (self.start, self.end) if edge_id is None else edge_id
         edge = self.G.get_edge(mask_edge_id[0],mask_edge_id[1])
         arguments = dict(edge['arguments']) if 'arguments' in edge else dict()
+        if len(argument_params) > 0:
+            arguments = argument_params
         if 'inputmaskname' in edge and edge['inputmaskname'] is not None:
             arguments['inputmaskname'] = edge['inputmaskname']
         mask, analysis, errors = self._compareImages(mask_edge_id[0], mask_edge_id[1], edge['op'],
                                                      arguments=arguments,
                                                      skipDonorAnalysis=skipDonorAnalysis,
                                                      analysis_params=analysis_params,
-                                                     force=True)
-        maskname = shortenName(mask_edge_id[0] + '_' + mask_edge_id[1], '_mask.png', id=self.G.nextId())
+                                                     force=force)
+        analysis_params['arguments'] = arguments
+        maskname = shortenName(mask_edge_id[0] + '_' + mask_edge_id[1], '_mask.png', identifier=self.G.nextId())
         self.G.update_mask(mask_edge_id[0], mask_edge_id[1], mask=mask, maskname=maskname, errors=errors, **consolidate(analysis, analysis_params))
         if len(errors) == 0:
             self.G.setDataItem('skipped_edges', [skip_data for skip_data in self.G.getDataItem('skipped_edges', []) if
                                                   (skip_data['start'], skip_data['end']) != mask_edge_id])
+        self.notify(mask_edge_id, 'update_edge')
         return errors
 
     def _connectNextImage(self, destination, mod, invert=False, sendNotifications=True, skipRules=False,
                           skipDonorAnalysis=False,
                           analysis_params={}):
+        """
+
+        :param destination:
+        :param mod:
+        :param invert:
+        :param sendNotifications:
+        :param skipRules:
+        :param skipDonorAnalysis:
+        :param analysis_params:
+        :return: Error message and success or failure
+        @rtype: (str, bool)
+        """
         try:
-            maskname = shortenName(self.start + '_' + destination, '_mask.png',id=self.G.nextId())
+            maskname = shortenName(self.start + '_' + destination, '_mask.png', identifier=self.G.nextId())
             if mod.inputMaskName is not None:
                 mod.arguments['inputmaskname'] = mod.inputMaskName
             mask, analysis, errors = self._compareImages(self.start, destination, mod.operationName,
@@ -1574,23 +1811,27 @@ class ImageProjectModel:
                     analysis[k] = v
             if 'recordMaskInComposite' in mod.arguments:
                 mod.recordMaskInComposite = mod.arguments.pop('recordMaskInComposite')
+                mod.recordMaskInComposite = getValue(analysis,'global','yes') == 'no' | mod.recordMaskInComposite
 
             self.__addEdge(self.start, self.end, mask, maskname, mod, analysis)
 
-            edgeErrors = [] if skipRules else graph_rules.run_rules(
-                self.gopLoader.getOperationWithGroups(mod.operationName, fake=True), self.G, self.start, destination)
-            msgFromRules = os.linesep.join(edgeErrors) if len(edgeErrors) > 0 else ''
-            if (self.notify is not None and sendNotifications):
+            if sendNotifications:
                 self.notify((self.start, destination), 'connect')
-            msgFromErrors = "Comparison errors occured" if errors and len(errors) > 0 else ''
-            msg = os.linesep.join([msgFromRules, msgFromErrors]).strip()
-            msg = msg if len(msg) > 0 else None
+            logging.getLogger('maskgen').debug('Validation')
+            edgeErrors = [] if skipRules else self.validator.run_edge_rules(self.G, self.start, destination, isolated=True)
+            edgeErrors = edgeErrors if len(edgeErrors) > 0 else None
             self.labelNodes(self.start)
             self.labelNodes(destination)
-            return msg, True
+            return edgeErrors, True
         except Exception as e:
-            logging.getLogger('maskgen').error(' '.join(traceback.format_stack()))
-            return 'Exception (' + str(e) + ')', False
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            logging.getLogger('maskgen').error(' '.join(traceback.format_exception(exc_type,exc_value,exc_traceback)))
+            return [ValidationMessage(Severity.ERROR,
+                                      self.start,
+                                      destination,
+                                      'Exception (' + str(e) + ')',
+                                      'Change Mask',
+                                      None)], False
 
     def __scan_args_callback(self, opName, arguments):
         """
@@ -1660,6 +1901,42 @@ class ImageProjectModel:
                 prefix = startNode['seriesname']
         return prefix
 
+
+    def nodesToCSV(self, filename, additionalpaths=list(), nodeFilter=None):
+        """
+        Create a CSV containing all the nodes of the graph.
+        By default, the first columns are project name, edge start node id,
+        edge end node id, and edge operation.
+        :param filename:
+        :param additionalpaths: paths that describe nested keys within the edge dictionary identifying
+        those keys' value to be placed as columns in the CSV
+        :param nodeFilter: a function that accepts the node dictionary and returns True if
+        the edge is to be included in the CSV file.  If the edgeFilter is None or not provided,
+        all edges are included in the CSV file
+        :return: None
+        @type filename: str
+        @type edgeFilter: func
+        """
+        import csv
+        csv.register_dialect('unixpwd', delimiter=',', quoting=csv.QUOTE_MINIMAL)
+        with open(filename, "ab") as fp:
+            fp_writer = csv.writer(fp)
+            for node_id in self.G.get_nodes():
+                node = self.G.get_node(node_id)
+                if nodeFilter is not None and not nodeFilter(node):
+                    continue
+                row = [self.G.get_name(), node_id, node['nodetype'], self.G.getNodeFileType(node_id), self.G.get_filename(node_id)]
+                for path in additionalpaths:
+                    if type(path) == 'str':
+                        values = getPathValues(node, path)
+                    else:
+                        values = path(node)
+                    if len(values) > 0:
+                        row.append(values[0])
+                    else:
+                        row.append('')
+                fp_writer.writerow(row)
+
     def toCSV(self, filename, additionalpaths=list(), edgeFilter=None):
         """
         Create a CSV containing all the edges of the graph.
@@ -1689,7 +1966,10 @@ class ImageProjectModel:
                     if path == 'basenode':
                         row.append(baseNodes[0])
                         continue
-                    values = getPathValues(edge, path)
+                    elif type(path) == 'str':
+                        values = getPathValues(edge, path)
+                    else:
+                        values = path(edge, edge_id=edge_id, op=self.gopLoader.getOperationWithGroups(edge['op']))
                     if len(values) > 0:
                         row.append(values[0])
                     else:
@@ -1703,7 +1983,7 @@ class ImageProjectModel:
         return self.end if self.end is not None else self.start
 
     def getFileName(self, nodeid):
-        return self.G.get_node(nodeid)['file']
+            return self.G.get_node(nodeid)['file']
 
     def startImageName(self):
         return self.G.get_node(self.start)['file'] if self.start is not None else ""
@@ -1721,47 +2001,35 @@ class ImageProjectModel:
         self.start = None
         self.end = None
         self.G.undo()
-        if self.notify is not None:
-            self.notify((s, e), 'undo')
+        self.notify((s, e), 'undo')
 
     def select(self, edge):
+        if self.getGraph().get_node(edge[0]) == None:
+            return False
         self.start = edge[0]
         self.end = edge[1]
+        return True
 
-    def startNew(self, imgpathname, suffixes=[], organization=None):
-        """ Inititalize the ProjectModel with a new project given the pathname to a base image file in a project directory """
-        projectFile = imgpathname[0:imgpathname.rfind(".")] + ".json"
-        projectType = fileType(imgpathname)
-        self.G = self._openProject(projectFile, projectType)
-        # do it anyway
-        self._autocorrect()
-        if organization is not None:
-            self.G.setDataItem('organization', organization)
-        self.start = None
-        self.end = None
-        self.addImagesFromDir(os.path.split(imgpathname)[0], baseImageFileName=os.path.split(imgpathname)[1],
-                              suffixes=suffixes, \
-                              sortalg=lambda f: os.stat(os.path.join(os.path.split(imgpathname)[0], f)).st_mtime)
-
-    def load(self, pathname):
-        """ Load the ProjectModel with a new project/graph given the pathname to a JSON file in a project directory """
-        self._setup(pathname)
-
-    def _openProject(self, projectFileName, projecttype):
+    def _openProject(self, projectFileName, projecttype, username=None,tool=None):
         return createGraph(projectFileName,
                            projecttype=projecttype,
                            arg_checker_callback=self.__scan_args_callback,
                            edgeFilePaths={'inputmaskname': 'inputmaskownership',
                                           'selectmasks.mask': '',
-                                          'videomasks.videosegment': ''},
-                           nodeFilePaths={'donors.*': ''})
+                                          'videomasks.videosegment': '',
+                                          'substitute subsitute': '',
+                                          'substitute videomasks.videosegment': ''},
+                           nodeFilePaths={'donors.*': ''},
+                           username=username if username is not None else self.username,
+                           tool=tool)
 
     def _autocorrect(self):
-        updateJournal(self)
+        if not updateJournal(self):
+            logging.getLogger('maskgen').error('Cannot auto update journal')
 
-    def _setup(self, projectFileName, graph=None, baseImageFileName=None):
+    def _setup(self, projectFileName, graph=None, baseImageFileName=None,tool=None):
         projecttype = None if baseImageFileName is None else fileType(baseImageFileName)
-        self.G = self._openProject(projectFileName, projecttype) if graph is None else graph
+        self.G = self._openProject(projectFileName, projecttype, username=self.username,tool=tool) if graph is None else graph
         self._autocorrect()
         self.start = None
         self.end = None
@@ -1779,6 +2047,7 @@ class ImageProjectModel:
         # inject loaded groups into the group operations manager
         for group, ops in self.G.getDataItem('groups', default_value={}).iteritems():
             self.gopLoader.injectGroup(group, ops)
+        self.validator = Validator(prefLoader, self.gopLoader)
 
     def getStartType(self):
         return self.G.getNodeFileType(self.start) if self.start is not None else 'image'
@@ -1799,6 +2068,7 @@ class ImageProjectModel:
         with self.lock:
             self.clear_validation_properties()
             self.assignColors()
+            self.setProjectSummary()
             self.G.save()
 
     def getEdgeItem(self, name, default=None):
@@ -1809,16 +2079,55 @@ class ImageProjectModel:
         for pred in self.G.predecessors(node):
             edge = self.G.get_edge(pred, node)
             if edge['op'] != 'Donor':
-                return self.getModificationForEdge(pred, node, edge)
+                return self.getModificationForEdge(pred, node)
         return None
 
     def getDescription(self):
         if self.start is None or self.end is None:
             return None
-        edge = self.G.get_edge(self.start, self.end)
-        if edge is not None:
-            return self.getModificationForEdge(self.start, self.end, edge)
-        return None
+        return self.getModificationForEdge(self.start, self.end)
+
+    def findPaths(self,node, condition):
+        """
+        Return a list of a tuple.  The first item is the full path in reverse order
+        from final node to current node.  The second item is a boolean indicating if the path
+        meets the condition.
+        :param node:
+        :param condition:
+        :return:
+        @rtype: list of (list,bool)
+        """
+        successors = self.G.successors(node)
+        if len(successors) == 0:
+            return [([node],False)]
+        else:
+            paths=[]
+            for successsor in successors:
+                for path in self.findPaths(successsor, condition):
+                    paths.append(path)
+            paths = [(path[0]+[node], condition(node, path[0][-1]) | path[1]) for path in paths]
+            return paths
+
+    def findEdgePaths(self,node):
+        """
+        Return a list of a tuple.  The first item is the full path in reverse order
+        from final node to current node.  The second item is a boolean indicating if the path
+        meets the condition.
+        :param node:
+        :param condition:
+        :return:
+        @rtype: list of (list,bool)
+        """
+        successors = self.G.successors(node)
+        if len(successors) == 0:
+            return [[]]
+        else:
+            paths=[]
+            for successsor in successors:
+                for path in self.findEdgePaths(successsor):
+                    paths.append(path)
+            paths = [path+[(node, successsor)] for path in paths]
+            return paths
 
     def getImage(self, name):
         if name is None or name == '':
@@ -1833,11 +2142,21 @@ class ImageProjectModel:
         @rtype (ImageWrapper,str)
         """
         if name is None or name == '':
-            return ImageWrapper(np.zeros((250, 250, 4)).astype('uint8'))
+            return ImageWrapper(np.zeros((250, 250, 4)).astype('uint8')),''
         return self.G.get_image(name, metadata=arguments)
 
     def getStartImageFile(self):
         return os.path.join(self.G.dir, self.G.get_node(self.start)['file'])
+
+    def getProxy(self):
+        return getValue(self.G.get_node(self.start),'proxyfile')
+
+    def setProxy(self, filename):
+        if filename is None:
+            if self.getProxy() is not None:
+                self.G.get_node(self.start).pop('proxyfile')
+            return
+        self.G.update_node(self.start,proxyfile=os.path.basename(filename))
 
     def getNextImageFile(self):
         return os.path.join(self.G.dir, self.G.get_node(self.end)['file'])
@@ -1887,11 +2206,17 @@ class ImageProjectModel:
         edge = self.G.get_edge(self.start, self.end)
         return edge['maskname'] if 'maskname' in edge else ''
 
-    def maskImage(self):
+    def maskImageFileTime(self):
         if self.end is None:
+            return 0
+        return self.G.get_edge_image_file_time(self.start, self.end, 'maskname')
+
+    def maskImage(self, inputmask=False):
+        mask = self.G.get_edge_image(self.start, self.end, 'maskname')
+        if self.end is None or mask is None:
             dim = (250, 250) if self.start is None else self.getImage(self.start).size
             return ImageWrapper(np.zeros((dim[1], dim[0])).astype('uint8'))
-        return self.G.get_edge_image(self.start, self.end, 'maskname')
+        return mask
 
     def maskStats(self):
         if self.end is None:
@@ -1921,14 +2246,33 @@ class ImageProjectModel:
         if self.G.has_node(end):
             self.end = end
 
-    def remove(self):
+    def remove(self, children=False):
+        import copy
         s = self.start
         e = self.end
+        list_to_process= []
+
+        if children:
+            list_to_process = copy.copy(self.G.successors(self.end if self.end is not None else self.start))
+
+        def remove_children(children):
+            for child in children:
+                remove_children(self.G.successors(child))
+                self.G.remove(child)
+                print (child)
+                self.notify((child, None), 'remove')
+
+        remove_children(list_to_process)
+
         """ Remove the selected node or edge """
         if (self.start is not None and self.end is not None):
-            self.G.remove_edge(self.start, self.end)
-            self.labelNodes(self.start)
-            self.labelNodes(self.end)
+            if children:
+                self.G.remove(self.end, None)
+                self.labelNodes(self.start)
+            else:
+                self.G.remove_edge(self.start, self.end)
+                self.labelNodes(self.start)
+                self.labelNodes(self.end)
             self.end = None
         else:
             name = self.start if self.end is None else self.end
@@ -1938,8 +2282,8 @@ class ImageProjectModel:
             self.end = None
             for node in p:
                 self.labelNodes(node)
-        if self.notify is not None:
-            self.notify((s, e), 'remove')
+
+        self.notify((s, e), 'remove')
 
     def getProjectData(self, item, default_value=None):
         return self.G.getDataItem(item, default_value=default_value)
@@ -1951,90 +2295,66 @@ class ImageProjectModel:
         :param excludeUpdate: True if the update does not change the update time stamp on the journal
         :return:
         """
+        self.notify((item,value),'meta')
         self.G.setDataItem(item, value, excludeUpdate=excludeUpdate)
 
     def getVersion(self):
         """ Return the graph/software versio n"""
         return self.G.getVersion()
 
+    def isFrozen(self):
+        return self.G.isFrozen()
+
     def getGraph(self):
+        """
+        :return: underlying graph
+        @rtype: ImageGraph
+        """
         return self.G
 
-    def validate(self, external=False):
-        """ Return the list of errors from all validation rules on the graph. """
+    def validate(self, external=False, status_cb=None):
+        """ Return the list of errors from all validation rules on the graph.
+        @rtype: list of ValidationMessage
+        """
 
-        self._executeSkippedComparisons()
+        notifier = self.notify.get_notifier_by_type(notifiers.ValidationNotifier)
+        if notifier is not None and not notifier.total_errors == None:
+            return notifier.total_errors
+
+        self._executeSkippedComparisons(status_cb=status_cb)
         logging.getLogger('maskgen').info('Begin validation for {}'.format(self.getName()))
-        total_errors = list()
-
-        finalNodes = list()
-        if len(self.G.get_nodes()) == 0:
-            return total_errors
-
-        for node in self.G.get_nodes():
-            if not self.G.has_neighbors(node):
-                total_errors.append((str(node), str(node), str(node) + ' is not connected to other nodes'))
-            predecessors = self.G.predecessors(node)
-            if len(predecessors) == 1 and self.G.get_edge(predecessors[0], node)['op'] == 'Donor':
-                total_errors.append((str(predecessors[0]), str(node), str(node) +
-                                     ' donor links must coincide with another link to the same destintion node'))
-            successors = self.G.successors(node)
-            if len(successors) == 0:
-                finalNodes.append(node)
-
-        project_type = self.G.get_project_type()
-        matchedType = [node for node in finalNodes if
-                       fileType(os.path.join(self.get_dir(), self.G.get_node(node)['file'])) == project_type]
-        if len(matchedType) == 0 and len(finalNodes) > 0:
-            self.G.setDataItem('projecttype',
-                               fileType(os.path.join(self.get_dir(), self.G.get_node(finalNodes[0])['file'])))
-
-        nodes = self.G.get_nodes()
-        anynode = nodes[0]
-        nodeSet = set(nodes)
-
+        total_errors = self.validator.run_graph_suite(self.getGraph(), external=external, status_cb=status_cb)
         for prop in getProjectProperties():
             if prop.mandatory:
                 item = self.G.getDataItem(prop.name)
                 if item is None or len(item.strip()) < 3:
                     total_errors.append(
-                        (str(anynode), str(anynode), 'Project property ' + prop.description + ' is empty or invalid'))
+                        ValidationMessage(Severity.ERROR,
+                                          '',
+                                          '',
+                                          'Project property ' + prop.description + ' is empty or invalid',
+                                          'Mandatory Property',
+                                          None))
+        if notifier is not None:
+            self.notify.replace(notifiers.ValidationNotifier(total_errors))
 
-        for found in self.G.findRelationsToNode(nodeSet.pop()):
-            if found in nodeSet:
-                nodeSet.remove(found)
-
-        for node in nodeSet:
-            total_errors.append((str(node), str(node), str(node) + ' is part of an unconnected subgraph'))
-
-        total_errors.extend(self.G.file_check())
-
-        cycleNode = self.G.getCycleNode()
-        if cycleNode is not None:
-            total_errors.append((str(cycleNode), str(cycleNode), "Graph has a cycle"))
-
-        for node in self.G.get_nodes():
-            for error in graph_rules.check_graph_rules(self.G, node, external=external, prefLoader=prefLoader):
-                total_errors.append((str(node), str(node), error))
-
-        for frm, to in self.G.get_edges():
-            edge = self.G.get_edge(frm, to)
-            op = edge['op']
-            errors = graph_rules.run_rules(self.gopLoader.getOperationWithGroups(op, fake=True), self.G, frm, to)
-            if len(errors) > 0:
-                total_errors.extend([(str(frm), str(to), str(frm) + ' => ' + str(to) + ': ' + err) for err in errors])
         return total_errors
 
     def assignColors(self):
         level = 1
         edgeMap = dict()
-        missingColors = 0
+        foundColors = 0
+        colors = []
+        edges = 0
         for edge_id in self.G.get_edges():
             edge = self.G.get_edge(edge_id[0], edge_id[1])
             if edge['op'] == 'Donor':
                 continue
-            missingColors += 1 if 'linkcolor' not in edge else 0
-        if missingColors == 0:
+            edges += 1
+            if 'linkcolor' in edge:
+                foundColors += 1
+                colors.append(edge['linkcolor'])
+        if edges == foundColors and len(set(colors)) ==foundColors:
             return
         for edge_id in self.G.get_edges():
             edge = self.G.get_edge(edge_id[0], edge_id[1])
@@ -2052,8 +2372,7 @@ class ImageProjectModel:
         prior = self.G.get_node(node)['nodetype'] if 'nodetype' in self.G.get_node(node) else None
         if prior != label:
             self.G.update_node(node, nodetype=label)
-            if self.notify is not None:
-                self.notify(node, 'label')
+            self.notify(node, 'label')
 
     def renameFileImages(self):
         """
@@ -2065,11 +2384,10 @@ class ImageProjectModel:
             nodeData = self.G.get_node(node)
             if nodeData['nodetype'] in ['final']:
                 logging.getLogger('maskgen').info('Inspecting {}  for rename'.format(nodeData['file']))
-                suffix_pos = nodeData['file'].rfind('.')
-                suffix = nodeData['file'][suffix_pos:].lower()
+                suffix = os.path.splitext(nodeData['file'])[1].lower()
                 file_path_name = os.path.join(self.G.dir, nodeData['file'])
                 try:
-                    new_file_name = md5offile(os.path.join(self.G.dir, nodeData['file'])) + suffix
+                    new_file_name = md5_of_file(os.path.join(self.G.dir, nodeData['file'])) + suffix
                     fullname = os.path.join(self.G.dir, new_file_name)
                 except:
                     logging.getLogger('maskgen').error(
@@ -2093,6 +2411,7 @@ class ImageProjectModel:
                             continue
                 else:
                     logging.getLogger('maskgen').warning('New name ' + new_file_name + ' already exists')
+                    self.G.update_node(node, file=new_file_name)
         self.save()
         return renamed
 
@@ -2129,6 +2448,14 @@ class ImageProjectModel:
             if node['nodetype'] == 'final':
                 final.append(name)
         return final
+
+    def baseNodes(self):
+        bases = []
+        for name in self.getNodeNames():
+            node = self.G.get_node(name)
+            if node['nodetype'] == 'base':
+                bases.append(name)
+        return bases
 
     def _findTerminalNodes(self, node, excludeDonor=False, includeOps=None):
         terminalsWithOps = self._findTerminalNodesWithCycleDetection(node, visitSet=list(), excludeDonor=excludeDonor)
@@ -2215,25 +2542,58 @@ class ImageProjectModel:
         """
         import copy
         pairs_composite = []
-        resultmsg = ''
+        resultmsgs = []
         kwargs_copy = copy.copy(kwargs)
         for filter in grp.filters:
-            msg, pairs = self.imageFromPlugin(filter, software=software,
+            msg, pairs = self.mediaFromPlugin(filter, software=software,
                                               **kwargs_copy)
             if msg is not None:
-                resultmsg += msg
+                resultmsgs.extend(msg)
             if len(pairs) == 0:
                 break
-            mod = self.getModificationForEdge(self.start,self.end,self.G.get_edge(self.start,self.end))
+            mod = self.getModificationForEdge(self.start,self.end)
             for key,value in mod.arguments.iteritems():
-                if key in kwargs_copy:
+                if key not in kwargs_copy or not self.getGraph().isEdgeFilePath('arguments.' + key):
                     kwargs_copy[key] = value
             pairs_composite.extend(pairs)
-        return resultmsg, pairs_composite
+        return resultmsgs, pairs_composite
 
-    def imageFromPlugin(self, filter, software=None,**kwargs):
+    def substitutesAllowed(self):
+        allowed = False
+        modification = self.getDescription()
+        if modification is not None:
+            allowed = getValue(modification.arguments, 'videoinputmaskname', '')
+        return 'disabled' if not allowed else 'normal'
+
+    def hasSubstituteMasks(self):
+        edge = self.getGraph().get_edge(self.start, self.end)
+        subs = getValue(edge, 'substitute videomasks', [])
+        return len(subs) > 0
+
+    def removeSubstituteMasks(self):
+        if self.hasSubstituteMasks():
+            edge = self.getGraph().get_edge(self.start, self.end)
+            edge.pop('substitute videomasks')
+
+    def addSubstituteMasks(self, filename):
+        edge = self.getGraph().get_edge(self.start, self.end)
+        subs = self.getLinkTool(self.start, self.end).addSubstituteMasks(self.start,
+                                                                  self.end,
+                                                                  self,
+                                                                  edge['op'],
+                                                                  arguments=getValue(edge,'arguments',{}),
+                                                                  filename=filename)
+        if subs is not None:
+            for sub in subs:
+                sub.pop('mask')
+            edge['substitute videomasks'] = subs
+            self.getGraph().addEdgeFilePath('substitute videomasks.videosegment','')
+            self.notify((self.start, self.end), 'update_edge')
+        return subs is not None
+
+    def mediaFromPlugin(self, filter, software=None, passthru=False, description=None, **kwargs):
         """
-          Create a new image from a plugin filter.
+          Use a plugin to create a new media item and link.
           This method is given the plugin name, Image, the full pathname of the image and any additional parameters
           required by the plugin (name/value pairs).
           The name of the resulting image contains the prefix of the input image file name plus an additional numeric index.
@@ -2248,102 +2608,122 @@ class ImageProjectModel:
           @type filter: str
           @type im: ImageWrapper
           @type filename: str
-          @rtype: list of (str, list (str,str))
+          @rtype: list of (ValidationMessage, list of (str,str))
         """
 
         im, filename = self.currentImage()
         filetype= fileType(filename)
         op = plugins.getOperation(filter)
-        suffixPos = filename.rfind('.')
-        suffix = filename[suffixPos:].lower()
-        preferred = plugins.getPreferredSuffix(filter)
+        suffix = os.path.splitext(filename)[1].lower()
+        preferred = plugins.getPreferredSuffix(filter,filetype=filetype)
+        if type(preferred) == dict:
+            preferred = preferred[filetype]
         fullOp = buildFilterOperation(op)
-        resolved, donors, graph_args = self._resolvePluginValues(kwargs, fullOp)
-        if preferred is not None:
+        resolved, donors, graph_args, suffix_override, donorargs = self._resolvePluginValues(kwargs, fullOp)
+        if suffix_override is not None:
+            suffix = suffix_override
+        elif preferred is not None:
             if preferred in donors:
                 suffix = os.path.splitext(resolved[preferred])[1].lower()
             else:
                 suffix = preferred
         target = os.path.join(tempfile.gettempdir(), self.G.new_name(self.start, suffix=suffix))
         shutil.copy2(filename, target)
-        msg = None
-        self.__addEdgeFilePaths(fullOp)
         try:
-            extra_args, warning_message = plugins.callPlugin(filter, im, filename, target, **resolved)
-        except Exception as e:
-            msg = str(e)
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            traceback.print_tb(exc_traceback, limit=10, file=sys.stderr)
-            logging.getLogger('maskgen').error(
-                'Plugin {} failed with {} given node {} for arguments {}'.format(filter, str(e),self.start, str(resolved)))
-            extra_args = None
-        if msg is not None:
-            return self._pluginError(filter, msg), []
-        if extra_args is not None and 'rename_target' in extra_args:
-            filename = extra_args.pop('rename_target')
-            newtarget = os.path.join(os.path.split(target)[0], os.path.split(filename)[1])
-            shutil.copy2(target, newtarget)
-            target = newtarget
-        if extra_args is not None and 'override_target' in extra_args:
-            filename = extra_args.pop('override_target')
-            target = os.path.join(os.path.split(target)[0], os.path.split(filename)[1])
-        if extra_args is not None and 'output_files' in extra_args:
-            file_params = extra_args.pop('output_files')
-            for name, value in file_params.iteritems():
-                extra_args[name] = value
-                self.G.addEdgeFilePath('arguments.' + name, '')
-        opInfo = self.gopLoader.getOperationWithGroups(op['name'], fake=True)
-        description = Modification(op['name'], filter + ':' + op['description'],
-                                   category=opInfo.category,
-                                   generateMask=opInfo.generateMask,
-                                   recordMaskInComposite=opInfo.recordMaskInComposite(filetype) if
-                                   'recordMaskInComposite' not in kwargs else kwargs['recordMaskInComposite'])
-        sendNotifications = kwargs['sendNotifications'] if 'sendNotifications' in kwargs else True
-        skipRules = kwargs['skipRules'] if 'skipRules' in kwargs else False
-        if software is None:
-            software = Software(op['software'], op['version'], internal=True)
-        if 'recordInCompositeMask' in kwargs:
-            description.setRecordMaskInComposite(kwargs['recordInCompositeMask'])
-        experiment_id = kwargs['experiment_id'] if 'experiment_id' in kwargs else None
-        description.setArguments(
-            {k: v for k, v in graph_args.iteritems() if k not in ['sendNotifications', 'skipRules', 'experiment_id']})
-        if extra_args is not None and type(extra_args) == type({}):
-            for k, v in extra_args.iteritems():
-                if k not in kwargs or v is not None:
-                    description.arguments[k] = v
-        description.setSoftware(software)
-        description.setAutomated('yes')
-        edge_parameters = {'plugin_name': filter,'experiment_id': experiment_id}
-        if  'global operation' in kwargs:
-            edge_parameters['global operation'] = kwargs['global operation']
-        msg2, status = self.addNextImage(target, mod=description, sendNotifications=sendNotifications,
-                                         skipRules=skipRules,
-                                         position=self._getCurrentPosition((75 if len(donors) > 0 else 0, 75)),
-                                         edge_parameters=edge_parameters,
-                                         node_parameters={
-                                             'experiment_id': experiment_id} if experiment_id is not None else {})
-        pairs = list()
+            msg = None
+            self.__addEdgeFilePaths(fullOp)
+            try:
+                if getValue(kwargs,'$$-pass-thru') or passthru:
+                    extra_args, warning_message = None,None
+                else:
+                    extra_args, warning_message = plugins.callPlugin(filter, im, filename, target, **resolved)
+            except Exception as e:
+                msg = str(e)
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                traceback.print_tb(exc_traceback, limit=10, file=sys.stderr)
+                logging.getLogger('maskgen').error(
+                    'Plugin {} failed with {} given node {} for arguments {}'.format(filter, str(e),self.start, str(resolved)))
+                extra_args = None
+            if msg is not None:
+                return self._pluginError(filter, msg), []
+            if extra_args is not None and 'rename_target' in extra_args:
+                filename = extra_args.pop('rename_target')
+                newtarget = os.path.join(os.path.split(target)[0], os.path.split(filename)[1])
+                shutil.copy2(target, newtarget)
+                target = newtarget
+            if extra_args is not None and 'override_target' in extra_args:
+                filename = extra_args.pop('override_target')
+                target = os.path.join(os.path.split(target)[0], os.path.split(filename)[1])
+            if extra_args is not None and 'output_files' in extra_args:
+                file_params = extra_args.pop('output_files')
+                for name, value in file_params.iteritems():
+                    extra_args[name] = value
+                    self.G.addEdgeFilePath('arguments.' + name, '')
+            opInfo = self.gopLoader.getOperationWithGroups(op['name'], fake=True)
+            description = Modification(op['name'], filter + ':' + op['description'] if description is None else description,
+                                       category=opInfo.category,
+                                       generateMask=opInfo.generateMask,
+                                       semanticGroups=graph_args['semanticGroups'] if 'semanticGroups' in graph_args else [],
+                                       recordMaskInComposite=opInfo.recordMaskInComposite(filetype) if
+                                       'recordMaskInComposite' not in kwargs else kwargs['recordMaskInComposite'])
+            sendNotifications = kwargs['sendNotifications'] if 'sendNotifications' in kwargs else True
+            skipRules = kwargs['skipRules'] if 'skipRules' in kwargs else False
+            if software is None:
+                software = Software(op['software'], op['version'], internal=True)
+            if 'recordInCompositeMask' in kwargs:
+                description.setRecordMaskInComposite(kwargs['recordInCompositeMask'])
+            experiment_id = kwargs['experiment_id'] if 'experiment_id' in kwargs else None
+            description.setArguments(
+                {k: v for k, v in graph_args.iteritems() if k not in ['semanticGroups','sendNotifications', 'skipRules', 'experiment_id']})
+            if extra_args is not None and type(extra_args) == type({}):
+                for k, v in extra_args.iteritems():
+                    if k not in kwargs or v is not None:
+                        description.arguments[k] = v
+            description.setSoftware(software)
+            description.setAutomated('yes')
+            edge_parameters = {'plugin_name': filter,'experiment_id': experiment_id}
+            if  'global operation' in kwargs:
+                edge_parameters['global operation'] = kwargs['global operation']
+            results2, status = self.addNextImage(target,
+                                                 mod=description,
+                                                 sendNotifications=sendNotifications,
+                                             skipRules=skipRules,
+                                             position=self._getCurrentPosition((75 if len(donors) > 0 else 0, 75)),
+                                             edge_parameters=edge_parameters,
+                                             node_parameters={
+                                                 'experiment_id': experiment_id} if experiment_id is not None else {})
+            pairs = list()
 
-        msg = '\n'.join([msg if msg else '',
-                         warning_message if warning_message else '',
-                         msg2 if msg2 else '']).strip()
-
-        os.remove(target)
+            errors = []
+            if warning_message is not None:
+                errors.append(ValidationMessage(Severity.WARNING,
+                                                self.start,
+                                                self.start,
+                                                warning_message,
+                                                'Plugin {}'.format(filter),
+                                                None))
+            if results2 is not None:
+                errors.extend(results2)
+        finally:
+            os.remove(target)
         if status:
             pairs.append((self.start, self.end))
+            if sendNotifications:
+                self.notify((self.start,  self.end), 'connect')
+
             for donor in donors:
                 _end = self.end
                 _start = self.start
                 self.selectImage(kwargs[donor])
-                self.connect(_end)
+                mod = Modification('Donor', '',category='Donor',automated='yes',arguments=donorargs)
+                self.connect(_end,mod=mod)
                 pairs.append((kwargs[donor], _end))
                 self.select((_start, _end))
-                # donor error message is skipped.  This annoys me (rwgdrummer).
+                # donor error message is removed.  This annoys me (rwgdrummer).
                 # really need to classify rules and skip certain categories
-                if 'donor' in msg:
-                    msg = None
+                errors = removeErrorMessages(errors,lambda msg: 'donor' in msg)
 
-        return self._pluginError(filter, msg), pairs
+        return errors, pairs
 
     def _resolvePluginValues(self, args, operation):
         parameters = {}
@@ -2352,7 +2732,14 @@ class ImageProjectModel:
         arguments = copy.copy(operation.mandatoryparameters)
         arguments.update(operation.optionalparameters)
         for k, v in args.iteritems():
-            if k in arguments or k in {'sendNotifications', 'skipRules', 'experiment_id', 'recordInCompositeMask'}:
+            if k in arguments or k in {'sendNotifications',
+                                       'override_suffix',
+                                       'skipRules',
+                                       'semanticGroups',
+                                       'experiment_id',
+                                       'recordInCompositeMask',
+                                       'donorargs',
+                                       'index'}:
                 parameters[k] = v
                 # if arguments[k]['type'] != 'donor':
                 stripped_args[k] = v
@@ -2360,16 +2747,28 @@ class ImageProjectModel:
             if k in arguments and \
                             arguments[k]['type'] == 'donor':
                 parameters[k] = self.getImageAndName(v)[1]
+                if parameters[k] is None:
+                    if os.path.exists(v):
+                        parameters[k] = v
+                    else:
+                        logging.getLogger('maskgen').error('Donor {} not found'.format(v))
                 donors.append(k)
         for arg, info in arguments.iteritems():
             if arg not in parameters and 'defaultvalue' in info and \
                             info['defaultvalue'] is not None:
                 parameters[arg] = info['defaultvalue']
-        return parameters, donors, stripped_args
+        return parameters, donors, stripped_args, \
+               args['override_suffix'] if 'override_suffix' in args else None, \
+               getValue(args,'donorargs',{})
 
     def _pluginError(self, filter, msg):
         if msg is not None and len(msg) > 0:
-            return 'Plugin ' + filter + ' Error:\n' + msg
+            return [ValidationMessage(Severity.ERROR,
+                                      self.start,
+                                      self.start,
+                                      'Plugin ' + filter + ': ' + msg,
+                                      'Plugin {}'.format(filter),
+                                      None)]
         return None
 
     def scanNextImageUnConnectedImage(self):
@@ -2425,7 +2824,7 @@ class ImageProjectModel:
         :return: descriptions for all edges
          @rtype list of Modification
         """
-        return [self.getModificationForEdge(edge[0], edge[1], self.G.get_edge(edge[0], edge[1])) for edge in
+        return [self.getModificationForEdge(edge[0], edge[1]) for edge in
                 self.G.get_edges()]
 
     def openImage(self, nfile):
@@ -2438,40 +2837,34 @@ class ImageProjectModel:
         return [edge for edge in [self.G.get_edge(edge[0], edge[1]) for edge in self.G.get_edges()]
                 if edge['op'] == opName]
 
-    def export(self, location, include=[]):
+    def getPathExtender(self):
+        from services.probes import CompositeExtender
+        """
+        :return: Extend the composite or donor through current operation
+        """
+        #nodes = self._findTerminalNodes(self.start, excludeDonor=True)
+        #if len(nodes) > 0:
+        return CompositeExtender(self)
+        #else:
+        #    return DonorExtender(self)
+
+    def export(self, location, include=[], redacted=[],notifier=None):
         with self.lock:
             self.clear_validation_properties()
             self.compress(all=True)
-            path, errors = self.G.create_archive(location, include=include)
-            return errors
+            path, errors = self.G.create_archive(location, include=include, redacted=redacted, notifier=notifier)
+            return path, [ValidationMessage(Severity.ERROR,error[0],error[1],error[2],'Export',None) for error in errors]
 
-    def exporttos3(self, location, tempdir=None):
-        import boto3
-        from boto3.s3.transfer import S3Transfer, TransferConfig
-        with self.lock:
-            self.clear_validation_properties()
-            self.compress(all=True)
-            path, errors = self.G.create_archive(tempfile.gettempdir() if tempdir is None else tempdir)
-            if len(errors) == 0:
-                config = TransferConfig()
-                s3 = S3Transfer(boto3.client('s3', 'us-east-1'), config)
-                BUCKET = location.split('/')[0].strip()
-                DIR = location[location.find('/') + 1:].strip()
-                logging.getLogger('maskgen').info('Upload to s3://' + BUCKET + '/' + DIR + '/' + os.path.split(path)[1])
-                DIR = DIR if DIR.endswith('/') else DIR + '/'
-                s3.upload_file(path, BUCKET, DIR + os.path.split(path)[1], callback=S3ProgressPercentage(path))
-                os.remove(path)
-                if self.notify is not None and not self.notify(self.getName(), 'export',
-                                   location='s3://' + BUCKET + '/' + DIR + os.path.split(path)[1]):
-                    errors = [('', '',
-                               'Export notification appears to have failed.  Please check the logs to ascertain the problem.')]
-            return errors
-
-    def export_path(self, location):
+    def export_path(self, location, redacted=[]):
+        """
+        :param location:
+        :param redacted: a list of registered file paths to exclude @see ImageGraph.addEdgeFilePath
+        :return:
+        """
         if self.end is None and self.start is not None:
-            self.G.create_path_archive(location, self.start)
+            self.G.create_path_archive(location, self.start, redacted=redacted)
         elif self.end is not None:
-            self.G.create_path_archive(location, self.end)
+            self.G.create_path_archive(location, self.end, redacted=redacted)
 
     def _getCurrentPosition(self, augment):
         if self.start is None:
@@ -2481,7 +2874,7 @@ class ImageProjectModel:
                 (startNode['ypos'] if startNode.has_key('ypos') else 50) + augment[1])
 
 
-    def getModificationForEdge(self, start, end, edge):
+    def getModificationForEdge(self, start, end):
         """
         :param start:
         :param end:
@@ -2492,6 +2885,9 @@ class ImageProjectModel:
         @rtype: Modification
         """
         end_node = self.G.get_node(end)
+        edge = self.G.get_edge(start, end)
+        if edge is None:
+            return None
         default_ctime = end_node['ctime'] if 'ctime' in end_node else None
         op = self.gopLoader.getOperationWithGroups(edge['op'], warning=True,fake=True)
         return Modification(edge['op'],
@@ -2529,48 +2925,62 @@ class ImageProjectModel:
             self.getGraph().update_edge(start, end, semanticGroups=grps)
             self.notify((self.start, self.end), 'update_edge')
 
-    def set_validation_properties(self, qaState, qaPerson, qaComment):
-        import time
-        self.setProjectData('validation', qaState, excludeUpdate=True)
-        self.setProjectData('validatedby', qaPerson, excludeUpdate=True)
-        self.setProjectData('validationdate', time.strftime("%m/%d/%Y"), excludeUpdate=True)
-        self.setProjectData('validationtime', time.strftime("%H:%M:%S"), excludeUpdate=True)
-        self.setProjectData('qacomment', qaComment.strip())
+    def setProjectSummary(self):
+        groups = []
+        for edgeTuple in self.getGraph().get_edges():
+            edge = self.getGraph().get_edge(edgeTuple[0], edgeTuple[1])
+            semantic_groups = getValue(edge,'semanticGroups',[])
+            for group in semantic_groups:
+                if group not in groups:
+                    groups.append(group)
+        self.setProjectData('semanticgroups', groups)
+
+    def set_validation_properties(self,  qaState, qaPerson, qaComment, qaData):
+        import qa_logic
+        qa_logic.ValidationData(self,qaState,qaPerson,None,qaComment,qaData)
 
     def clear_validation_properties(self):
-        import time
-        validationProps = {'validation': 'no', 'validatedby': '', 'validationtime': '', 'validationdate': ''}
-        currentProps = {}
-        for p in validationProps:
-            currentProps[p] = self.getProjectData(p)
-        datetimeval = time.clock()
-        if currentProps['validationdate'] is not None and \
-                        len(currentProps['validationdate']) > 0:
-            datetimestr = currentProps['validationdate'] + ' ' + currentProps['validationtime']
-            datetimeval = time.strptime(datetimestr, "%m/%d/%Y %H:%M:%S")
-        if all(vp in currentProps for vp in validationProps) and \
-                        currentProps['validatedby'] != get_username() and \
-                        self.getGraph().getLastUpdateTime() > datetimeval:
-            for key, val in validationProps.iteritems():
-                self.setProjectData(key, val, excludeUpdate=True)
+        import qa_logic
+        logic = qa_logic.ValidationData(self)
+        logic.clearProperties()
 
+    def set_probe_mask_memory(self, memory):
+        self.probeMaskMemory = memory
+
+    """Not sure if this will ever see any use"""
+    def get_probe_mask_memory(self):
+        return self.probeMaskMemory
 
 class VideoMaskSetInfo:
     """
     Set of change masks video clips
     """
+
     columnNames = ['Start', 'End', 'Frames', 'File']
+    func = [float,float,int,str]
+    columnKeys = ['starttime', 'endtime', 'frames', 'File']
     columnValues = {}
 
     def __init__(self, maskset):
-        self.columnValues = {}
-        for i in range(len(maskset)):
-            self.columnValues['{:=02d}'.format(i)] = self._convert(maskset[i])
+        self.maskset = maskset
+        self.columnValues = {'{:=02d}'.format(i):self._convert(maskset[i]) for i in range(len(maskset))}
 
     def _convert(self, item):
-        return {'Start': self.tofloat(item['starttime']), 'End': self.tofloat(item['endtime']),
-                'Frames': item['frames'],
-                'File': item['videosegment'] if 'videosegment' in item else ''}
+        return {'Start': self.tofloat(video_tools.get_start_time_from_segment(item)),
+                'End': self.tofloat(video_tools.get_end_time_from_segment(item)),
+                'Frames': video_tools.get_frames_from_segment(item),
+                'File': video_tools.get_file_from_segment(item,default_value='')}
+
+
+    def update(self, item_number, column, value):
+        video_tools.update_segment(self.maskset[item_number],
+                       **{self.columnKeys[column] : self.func[column](value)})
+        video_tools.update_segment(self.maskset[item_number],rate= \
+                                            (video_tools.get_end_time_from_segment(self.maskset[item_number]) -
+                                             video_tools.get_start_time_from_segment(self.maskset[item_number])/
+                                             video_tools.get_frames_from_segment(self.maskset[item_number])))
 
     def tofloat(self, o):
         return o if o is None else float(o)
+
+

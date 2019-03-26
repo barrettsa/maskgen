@@ -1,3 +1,11 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
+
 from __future__ import print_function
 import time
 import logging
@@ -10,12 +18,13 @@ class MaskGenTimedRotatingFileHandler(handlers.TimedRotatingFileHandler):
     Always roll-over if it is a new day, not just when the process is active
     """
     forceRotate = False
+
     def __init__(self, filename):
         if os.path.exists(filename):
             yesterday = time.strftime("%Y-%m-%d", time.gmtime(int(os.stat(filename).st_ctime)))
             today = time.strftime("%Y-%m-%d", time.gmtime(time.time()))
             self.forceRotate = (yesterday != today)
-        handlers.TimedRotatingFileHandler.__init__(self,filename, when='D', interval=1, utc=True)
+        handlers.TimedRotatingFileHandler.__init__(self, filename, when='D', interval=1, utc=True)
 
     def shouldRollover(self, record):
         """
@@ -30,12 +39,15 @@ class MaskGenTimedRotatingFileHandler(handlers.TimedRotatingFileHandler):
             return 1
         return 0
 
+
 def set_logging_level(level):
+    logging.getLogger('maskgen').setLevel(level)
     for handler in logging.getLogger('maskgen').handlers:
         handler.setLevel(level)
 
-def set_logging(directory=None, filename='maskgen.log'):
-    logger = logging.getLogger('maskgen')
+
+def set_logging(directory=None, filename='maskgen.log',skip_config=False,logger_name = 'maskgen'):
+    logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
 
     for handler in logger.handlers:
@@ -53,7 +65,7 @@ def set_logging(directory=None, filename='maskgen.log'):
     logger.addHandler(ch)
 
     dir = directory if directory is not None and os.path.isdir(directory) else '.'
-    logfile = os.path.join(os.getenv("HOME"),filename) if not os.access(dir,os.W_OK) else os.path.join(dir,filename)
+    logfile = os.path.join(os.getenv("HOME"), filename) if not os.access(dir, os.W_OK) else os.path.join(dir, filename)
 
     fh = MaskGenTimedRotatingFileHandler(logfile)
 
@@ -64,8 +76,8 @@ def set_logging(directory=None, filename='maskgen.log'):
     # add ch to logger
     logger.addHandler(fh)
 
-    if os.path.exists('logging.config'):
-        print ('Establishing logging configuration from file')
+    if not skip_config and os.path.exists('logging.config'):
+        print('Establishing logging configuration from file')
         config.fileConfig('logging.config')
 
 

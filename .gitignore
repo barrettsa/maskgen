@@ -1,0 +1,12 @@
+
+*.pyc
+*.xml
+*.iml
+maskgen/Untitled.json
+maskgen.log*
+.idea/*
+dist/*
+hp_tool/dist/*
+hp_tool/build/*
+hp_tool/hptool.egg-info/*
+maskgen.egg-info/*

@@ -1,3 +1,11 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+#==============================================================================
+
 from threading import Lock, local,currentThread
 import logging
 import os
@@ -21,13 +29,15 @@ class EndOfResource(Exception):
     def __str__(self):
         return "Resource {} depleted".format(self.resource)
 
-def randomGenerator(function):
+def nextItemGenerator(function):
     while True:
         yield function()
 
 def randomGeneratorFactory(function):
-    return lambda : randomGenerator(function)
+    return lambda : nextItemGenerator(function)
 
+def listIterator(items):
+    return lambda: items.__iter__()
 
 class PermuteGroupElement:
 
@@ -44,7 +54,6 @@ class PermuteGroupElement:
         self.dependent = dependent
         self.current = local()
         self.toSave = False
-        #self.current = self.iterator.next()
 
     def next(self,chained=False):
         """
@@ -96,6 +105,13 @@ class PermuteGroupElement:
     def restore(self,dir):
         pass
 
+
+class FailedStateGroupElement(PermuteGroupElement):
+    """
+    A non-persistent state from failed elements
+    """
+    def __init__(self, name, list_of_values):
+        PermuteGroupElement.__init__(self, name, listIterator(list_of_values))
 
 class PersistentPermuteGroupElement(PermuteGroupElement):
 
@@ -211,6 +227,15 @@ class ListPermuteGroupElement(IteratorPermuteGroupElement):
         self.list_of_values = list_of_values
         IteratorPermuteGroupElement.__init__(self,name,list_of_values.__iter__,dependent=dependent)
 
+class ConstantGroupElement(PermuteGroupElement):
+
+    def __init__(self, name, value):
+        PermuteGroupElement.__init__(self, name, listIterator([value]))
+        self.current.item = value
+
+    def next(self,chained=False):
+       pass
+
 class PermuteGroup:
     """
     A single group of iterators
@@ -272,7 +297,6 @@ class PermuteGroup:
                 # at this point, all are exhausted
                 self.completed = set(self.iterators.keys())
 
-
     def has_specification(self, name):
         return name  in self.iterators
 
@@ -300,10 +324,17 @@ class PermuteGroupManager:
     @type groups: Dict[string, PermuteGroup]
     """
 
-    def __init__(self,dir='.'):
+    def __init__(self,dir='.', fromFailedStateFile=None):
+        """
+
+        :param dir: directory path
+        :param fromFailedStateFile: file name in the given directory
+        """
         self.groups = dict()
         self.dir = dir
         self.lock = Lock()
+        if fromFailedStateFile is not None:
+            self.loadFromFailedState(fromFailedStateFile)
 
     def loadParameter(self, group_name, permuteGroupElement):
         """
@@ -319,7 +350,6 @@ class PermuteGroupManager:
                 self.groups[name] = PermuteGroup(name,chained=name!='__global__',dir=self.dir)
             if not self.groups[name].has_specification(permuteGroupElement.name):
                 self.groups[name].add(permuteGroupElement)
-
 
     def next(self):
         """
@@ -367,3 +397,43 @@ class PermuteGroupManager:
         with self.lock:
             for group in self.groups.values():
                 group.save()
+
+    def loadFromFailedState(self, fileName):
+        import json
+        self.groups = dict()
+        all_items_lists = {}
+        with open(os.path.join(self.dir, fileName), 'r') as fp:
+            for line in fp.readlines():
+                failed_state = json.loads(line)
+                for grp_name, grp_state in failed_state.iteritems():
+                    if grp_name not in self.groups:
+                        all_items_lists[grp_name] = {}
+                        self.groups[grp_name] = PermuteGroup(grp_name,chained=grp_name!='__global__',dir=self.dir)
+                    for element_name, element in grp_state.iteritems():
+                        if element_name not in all_items_lists[grp_name]:
+                            all_items_lists[grp_name][element_name] = []
+                        all_items_lists[grp_name][element_name].append(element)
+        for grp_name, grp_lists in all_items_lists.iteritems():
+            for item_name, item_list in grp_lists.iteritems():
+                self.groups[grp_name].add(FailedStateGroupElement(item_name,item_list))
+
+    def retainFailedState(self,filename=None):
+        """
+        Place the failed state in a file where each line is a separate JSON instance of the state
+        @param filename: optional overriding filename,  otherwise failures-y-m-d.txt
+        :return:
+        """
+        from datetime import datetime
+        import json
+        failed_state = {name:{} for name in self.groups}
+        for name, grp in self.groups.iteritems():
+            for spec_name in grp.iterators:
+                value = grp.current(spec_name)
+                # do not allow null
+                if value is not None:
+                    failed_state[name][spec_name] = grp.current(spec_name)
+        with self.lock:
+            file_to_use = filename if filename is not None else 'failures-%s.txt'%datetime.strftime(datetime.now(), '%Y_%m_%d_%H_%M_%S')
+            with open(os.path.join(self.dir,file_to_use),'w+') as fp:
+                json.dump(failed_state,fp)
+                fp.write(os.linesep)

@@ -1,8 +1,7 @@
 import requests
 import json
 import os
-import data_files
-import tkMessageBox
+from data_files import _DEVICES, _LOCALDEVICES
 
 
 class API_Camera_Handler:
@@ -12,16 +11,20 @@ class API_Camera_Handler:
     :param token: browser login token
     :param given_id: camera local id to look up
     """
-    def __init__(self, master, url, token, given_id):
+    def __init__(self, master, url, token, given_id, localfile=(_LOCALDEVICES if os.path.exists(_LOCALDEVICES) else
+                 _DEVICES)):
         self.master = master
         self.url = url
         self.token = token
         self.given_id = given_id
+        self.localfile = localfile
         self.localIDs = []
         self.models_hp = []
         self.models_exif = []
         self.makes_exif = []
         self.sn_exif = []
+        self.ids = []
+        self.device_types = []
         self.all = {}
         self.source = None
         if given_id == "download_locally":
@@ -50,10 +53,16 @@ class API_Camera_Handler:
     def get_source(self):
         return self.source
 
+    def get_ids(self):
+        return self.ids
+
+    def get_types(self):
+        return self.device_types
+
     def load_data(self):
         try:
             headers = {'Authorization': 'Token ' + self.token, 'Content-Type': 'application/json'}
-            url = self.url + '/api/cameras/filters/?fields=hp_device_local_id, hp_camera_model, exif_device_serial_number, exif_camera_model, exif_camera_make/'
+            url = self.url + '/cameras/filters/?fields=hp_device_local_id, hp_camera_model, exif_device_serial_number, exif_camera_model, exif_camera_make/'
             camera_data = {"hp_device_local_id": {"type": "exact", "value": self.given_id}}
             print 'Updating camera list from browser API... ',
 
@@ -65,6 +74,8 @@ class API_Camera_Handler:
                         self.all[item['hp_device_local_id']] = item
                         self.localIDs.append(item['hp_device_local_id'])
                         self.models_hp.append(item['hp_camera_model'])
+                        self.ids.append(item['id'])
+                        self.device_types.append(item['camera_type'])
                         for configuration in item['exif']:
                             self.models_exif.append(configuration['exif_camera_model'])
                             self.makes_exif.append(configuration['exif_camera_make'])
@@ -73,15 +84,6 @@ class API_Camera_Handler:
                 else:
                     raise requests.HTTPError()
             print 'complete.'
-
-            with open(data_files._LOCALDEVICES, 'a+') as j:
-                found = False
-                for item in json.load(j):
-                    if item == self.all.items()[0][0]:
-                        found = True
-                        break
-                if not found:
-                    json.dump(self.all, j, indent=4)
 
             self.source = 'remote'
         except:
@@ -92,13 +94,14 @@ class API_Camera_Handler:
             self.makes_exif = []
             self.sn_exif = []
             self.all = {}
-            devices_path = data_files._LOCALDEVICES if os.path.exists(data_files._LOCALDEVICES) else data_files._DEVICES
-            with open(devices_path) as j:
+            with open(self.localfile) as j:
                 device_data = json.load(j)
             for localID, data in device_data.iteritems():
                 self.all[localID] = data
                 self.localIDs.append(data['hp_device_local_id'])
                 self.models_hp.append(data['hp_camera_model'])
+                self.ids.append(data['id'])
+                self.device_types.append(data['camera_type'])
                 for configuration in data['exif']:
                     self.models_exif.append(configuration['exif_camera_model'])
                     self.makes_exif.append(configuration['exif_camera_make'])
@@ -109,7 +112,7 @@ class API_Camera_Handler:
     def write_devices(self):
         try:
             headers = {'Authorization': 'Token ' + self.token, 'Content-Type': 'application/json'}
-            url = self.url + '/api/cameras/filters/?fields=hp_device_local_id, hp_camera_model, exif_device_serial_number, exif_camera_model, exif_camera_make/'
+            url = self.url + '/cameras/filters/?fields=hp_device_local_id, hp_camera_model, exif_device_serial_number, exif_camera_model, exif_camera_make/'
             camera_data = {"high_provenance": {"type": "exact", "value": True}}
 
             print 'Downloading camera list from browser API... ',
@@ -126,9 +129,62 @@ class API_Camera_Handler:
                         break
                 else:
                     raise requests.HTTPError()
-            print 'complete.'
-        except:
-            print 'Could not connect to browser.  Try again later.'
 
-        with open(data_files._LOCALDEVICES, 'w') as j:
-            json.dump(self.all, j, indent=4)
+            with open(_LOCALDEVICES, 'w') as j:
+                json.dump(self.all, j, indent=4)
+
+            self.source = 'remote'
+
+            print 'complete.'
+        except (requests.ConnectionError, requests.ConnectTimeout, requests.HTTPError):
+            print 'Could not connect to browser.  Try again later.'
+            self.source = 'local'
+
+
+class ValidResolutions:
+    def __init__(self, master, url, token, local_id=None, cam_id=None):
+        self.master = master
+        self.url = url
+        self.token = token
+        self.cam_id = cam_id
+        self.resolutions = {"primary": [], "secondary": []}
+
+        if local_id and not self.cam_id:
+            cam = API_Camera_Handler(self.master, self.url, self.token, local_id)
+            try:
+                self.cam_id = cam.get_ids()[0]
+            except IndexError:
+                return
+
+        if self.cam_id:
+            self.fetch_resolutions()
+
+    def fetch_resolutions(self):
+        print('Fetching valid sizes... '),
+        try:
+            headers = {'Authorization': 'Token ' + self.token, 'Content-Type': 'application/json'}
+            url = self.url + "/cameras/" + str(self.cam_id) + "/sizes/"
+
+            # get primary data
+            response = requests.get(url + "?primary_secondary=primary", headers=headers)
+            if response.status_code == requests.codes.ok:
+                r = json.loads(response.content)
+                for item in r:
+                    self.resolutions['primary'].append((item['width'], item['height']))
+
+            # get secondary data
+            response = requests.get(url + "?primary_secondary=secondary", headers=headers)
+            if response.status_code == requests.codes.ok:
+                r = json.loads(response.content)
+                for item in r:
+                    self.resolutions['secondary'].append((item['width'], item['height']))
+
+            print('complete.')
+        except (requests.ConnectionError, requests.ConnectTimeout):
+            print('\nCould not fetch camera sizes.  Try again later')
+            pass
+        return
+
+    def get_resolutions(self):
+        return self.resolutions
+

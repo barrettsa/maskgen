@@ -1,163 +1,130 @@
 RequestExecutionLevel admin
 
 !include EnvVarUpdate.nsh
-!include WordFunc.nsh
-!insertmacro WordReplace
 
 Outfile "jt_installer.exe"
 name "JT Installer"
 
-InstallDir $DESKTOP
-
-Var CONDA 
-Var PIP
-Var PYTHON 
-Var USERDIR 
-Var BRANCH 
+InstallDir $TEMP
 
 Section -Prerequisites
-    MessageBox MB_OK "Specific versions of each prerequisite are required for$\neverything to work properly.  Please verify that any previously$\ninstalled prerequisites match the following versions:$\n$\n$\tAnaconda2$\t$\t4.4.0$\n$\tFFmpeg$\t$\t$\t3.2.X$\n$\tExiftool$\t$\t$\t10.61$\n$\tOpenCV$\t$\t$\t2.4.13.X$\n$\tGraphViz$\t$\t$\t2.38"
-
-	MessageBox MB_YESNO "Do you need the prerequisites installed?$\n(e.g. anaconda, exiftool, graphviz etc.)" /SD IDYES IDNO prereqs_installed
-
-    SetOutPath $INSTDIR
-    ReadRegStr $0 HKLM "SOFTWARE\Python\ContinuumAnalytics\Anaconda27-64" SysVersion
-    StrCmp $0 "" lbl_install_conda lbl_has_conda
-    StrCmp $0 "2.7" lbl_has_conda lbl_install_conda
-
-    lbl_install_conda:
-
-    MessageBox MB_YESNO "Install Anaconda Python 2.7?" /SD IDYES IDNO lbl_has_conda
-    File "Prerequisites\Anaconda2-4.4.0-Windows-x86_64.exe"
-	Sleep 5000
-    ExecWait "$INSTDIR\Anaconda2-4.4.0-Windows-x86_64.exe /S /InstallationType=JustMe /AddToPath=1 /D=$PROFILE\Anaconda2\"
-	Delete "$INSTDIR\Anaconda2-4.4.0-Windows-x86_64.exe"
-
-    lbl_has_conda:
-	StrCpy $CONDA "$PROFILE\Anaconda2\Scripts\conda.exe"
-	StrCpy $PIP "$PROFILE\Anaconda2\Scripts\pip.exe"
-	StrCpy $PYTHON "$PROFILE\Anaconda2\python.exe"
-
-	IfFileExists "$PROGRAMFILES64\Exiftool\*.*" has_exiftool
-    File "Prerequisites\exiftool-10.61.zip"
-    NsUnzip::Extract "$INSTDIR\exiftool-10.61.zip" /END
-	CreateDirectory "$PROGRAMFILES64\Exiftool"
-	Rename "$INSTDIR\exiftool (-k).exe" "$PROGRAMFILES64\Exiftool\exiftool.exe"
-	Delete "$INSTDIR\exiftool-10.61.zip"
-    ${EnvVarUpdate} $0 "PATH" "A" "HKCU" "C:\Program Files\Exiftool"
+    MessageBox MB_OK "Specific versions of each prerequisite are required for$\neverything to work properly.  Please verify that any previously$\ninstalled prerequisites match the following versions:$\n$\n$\tAnaconda2$\t$\t4.4.0$\n$\tFFmpeg$\t$\t$\t3.2+$\n$\tExiftool$\t$\t$\t10.6X+$\n$\tOpenCV$\t$\t$\t2.4.13+$\n$\tGraphViz$\t$\t$\t2.38"
     
-	has_exiftool:
-    IfFileExists "$PROGRAMFILES64\ffmpeg-3.2-win64-shared\bin\ffmpeg.exe" has_ffmpeg
-    File "Prerequisites\ffmpeg-3.2-win64-shared.zip"
-    NsUnzip::Extract "$INSTDIR\ffmpeg-3.2-win64-shared.zip" /d=$PROGRAMFILES64 /END
-	Delete "$INSTDIR\ffmpeg-3.2-win64-shared.zip"
-    ${EnvVarUpdate} $0 "FFMPEG" "A" "HKCU" "C:\Program Files\ffmpeg-3.2-win64-shared"
-    ${EnvVarUpdate} $0 "PATH" "P" "HKCU" "%FFMPEG%\bin"
+    MessageBox MB_YESNO "Do you need the prerequisites installed?$\n(e.g. exiftool, graphviz etc.)" /SD IDYES IDNO prereqs_installed
+    
+    ; Search for Anaconda Installed
+    SetRegView 64
+    ClearErrors
+    ReadRegStr $R0 HKLM "SOFTWARE\Python\ContinuumAnalytics\Anaconda27-64" "SysVersion"
+    DetailPrint "Local Machine Anaconda found version $R1"
+    IfErrors +1 verify_python
+    
+    ClearErrors
+    Pop $R0
+    ReadRegStr $R0 HKCU "SOFTWARE\Python\ContinuumAnalytics\Anaconda27-64" "SysVersion"
+    DetailPrint "Current User Git found version $R1"
+    IfErrors no_git_or_python +1
+    
+    verify_python:
+    StrCmp $R0 "2.7" find_git no_git_or_python
+    
+    ; Search for Git Installed
+    find_git:
+    ClearErrors  ; Shouldn't change anything, but just in case
+    ReadRegStr $R1 HKLM "SOFTWARE\GitForWindows" "CurrentVersion"
+    DetailPrint "Local Machine Git found version $R1"
+    IfErrors +1 inst_ready
+    
+    ClearErrors
+    Pop $R1
+    ReadRegStr $R1 HKCU "SOFTWARE\GitForWindows" "CurrentVersion"
+    DetailPrint "Current User Git found version $R1"
+    IfErrors +1 inst_ready
+    
+    no_git_or_python:
+        MessageBox MB_YESNO "Do you have Anaconda for Python 2.7 installed?$\n" IDYES inst_ready IDNO +1
+        MessageBox MB_OK "Anaconda for Python 2.7 and Git must be installed prior to JT Installation.  Please install Anaconda and Git and try again."
+        Quit
+
+    inst_ready:
+    SetOutPath $INSTDIR
+    
+    MessageBox MB_YESNO "Install Visual C++ for Python 2.7?" /SD IDYES IDNO has_vcpp
+    File "Prerequisites\VCForPython27.msi"
+    ExecWait "msiexec.exe /i $INSTDIR\VCForPython27.msi /quiet"
+    Delete "$INSTDIR\VCForPython27.msi"
+    
+    has_vcpp:
+    MessageBox MB_YESNO "Install Visual C++ 2008?" /SD IDYES IDNO has_vc27    
+    File "Prerequisites\vcredist_x64.exe"
+    ExecWait "$INSTDIR\vcredist_x64.exe /qb"
+    Delete "$INSTDIR\vcredist_x64.exe"
+    
+    has_vc27:
+    IfFileExists "$PROGRAMFILES64\Exiftool\*.*" has_exiftool
+    File "Prerequisites\exiftool-11.02.zip"
+    NsUnzip::Extract "$INSTDIR\exiftool-11.02.zip" /END
+    CreateDirectory "$PROGRAMFILES64\Exiftool"
+    Rename "$INSTDIR\exiftool(-k).exe" "$PROGRAMFILES64\Exiftool\exiftool.exe"
+    Delete "$INSTDIR\exiftool-11.02.zip"
+    ${EnvVarUpdate} $0 "PATH" "A" "HKLM" "C:\Program Files\Exiftool"
+    
+    has_exiftool:
+    IfFileExists "$PROGRAMFILES64\ffmpeg-3.3.4-win64-static\bin\ffmpeg.exe" has_ffmpeg
+    File "Prerequisites\ffmpeg-3.3.4-win64-static.zip"
+    NsUnzip::Extract "$INSTDIR\ffmpeg-3.3.4-win64-static.zip" /d=$PROGRAMFILES64 /END
+    Delete "$INSTDIR\ffmpeg-3.3.4-win64-static.zip"
+    ${EnvVarUpdate} $0 "PATH" "P" "HKLM" "$PROGRAMFILES64\ffmpeg-3.3.4-win64-static\bin"
 
     has_ffmpeg:
-	IfFileExists "$PROGRAMFILES32\Graphviz2.38\bin\*.*" has_graphviz
-	File "Prerequisites\graphviz-2.38.msi"
-	ExecWait "msiexec.exe /i $INSTDIR\graphviz-2.38.msi /quiet"
-	Delete "$INSTDIR\graphviz-2.38.msi"
-    ${EnvVarUpdate} $0 "PATH" "A" "HKCU" "C:\Program Files (x86)\Graphviz2.38\bin"
+    IfFileExists "$PROGRAMFILES32\Graphviz2.38\bin\*.*" has_graphviz
+    File "Prerequisites\graphviz-2.38.msi"
+    ExecWait "msiexec.exe /i $INSTDIR\graphviz-2.38.msi /quiet"
+    Delete "$INSTDIR\graphviz-2.38.msi"
+    ${EnvVarUpdate} $0 "PATH" "A" "HKLM" "C:\Program Files (x86)\Graphviz2.38\bin"
+    
+    has_graphviz:
+    IfFileExists "$PROFILE\medifor_ingest.gpg" has_gpg_key
+    SetOutPath "$PROFILE"
+    File "Prerequisites\medifor_ingest.gpg"
+    
+    has_gpg_key:
+    IfFileExists "$PROGRAMFILES64\opencv\*.*" +1 no_opencv
+    RMDir /r $PROGRAMFILES64\opencv
+    ${EnvVarUpdate} $0 "PATH" "R" "HKLM" "$PROGRAMFILES64\opencv\bin"
+    
+    no_opencv:
+    SetOutPath "$INSTDIR"
+    File "Prerequisites\pygraphviz-1.3.1-cp27-none-win_amd64.whl"
+    File "Prerequisites\Shapely-1.6.4.post1-cp27-cp27m-win_amd64.whl"
+    File "WindowsInstallScript.py"
+    ExecWait "python $INSTDIR\WindowsInstallScript.py"
+    Delete "$INSTDIR\pygraphviz-1.3.1-cp27-none-win_amd64.whl"
+    Delete "$INSTDIR\Shapely-1.6.4.post1-cp27-cp27m-win_amd64.whl"
+    Delete "$INSTDIR\WindowsInstallScript.py"
+    
+    SetShellVarContext all
+    Delete "$DESKTOP\Kleopatra.lnk"
+	SetShellVarContext current
 	
-	has_graphviz:
-	MessageBox MB_YESNO "Install Visual C++ for Python 2.7?" /SD IDYES IDNO has_vc27
-	File "Prerequisites\VCForPython27.msi"
-	ExecWait "msiexec.exe /i $INSTDIR\VCForPython27.msi /quiet"
-	Delete "$DESKTOP\VCForPython27.msi"
-	
-	has_vc27:
-	IfFileExists "$PROGRAMFILES64\opencv\build\*.*" has_cvd_build
-	File "Prerequisites\opencv-2.4.13.3-vc14.exe"
-	ExecWait "opencv-2.4.13.3-vc14.exe -y"
-	Rename "$DESKTOP\opencv" "$PROGRAMFILES64\opencv"
-	${EnvVarUpdate} $0 "CV2" "A" "HKCU" "$PROGRAMFILES64\opencv\build\x64\vc14\bin"
-	${EnvVarUpdate} $0 "PATH" "A" "HKCU" "%CV2%"
-	Delete "$DESKTOP\opencv-2.4.13.3-vc14.exe"
-	
-	has_cvd_build:
-    IfFileExists "$PROFILE\Anaconda2\Lib\cv2.pyd" +1 +2
-    Rename "$PROFILE\Anaconda2\Lib\cv2.pyd" "$PROGRAMFILES64\opencv\build\python\2.7\x64\cv2.pyd"
-	IfFileExists "$PROFILE\Anaconda2\Lib\site-packages\cv2.pyd" has_cv2_installed
-	CopyFiles "$PROGRAMFILES64\opencv\build\python\2.7\x64\cv2.pyd" "$PROFILE\Anaconda2\Lib\site-packages\"
-
-	has_cv2_installed:
-	ExecWait "$CONDA install -c conda-forge tifffile -y"
-	ExecWait "$CONDA remove pillow -y"
-    ExecWait "$PIP uninstall Pillow -y"
-	ExecWait "$CONDA remove PIL -y"
-    ExecWait "$CONDA install -c anaconda pillow -y"
-	ExecWait "$CONDA install scikit-image -y"
-
-	SetOutPath "$INSTDIR"
-	ExecWait "$PIP install graphviz"
-	File "Prerequisites\pygraphviz-1.3.1-cp27-none-win_amd64.whl"
-	ExecWait "$PIP install $INSTDIR\pygraphviz-1.3.1-cp27-none-win_amd64.whl"
-	Delete "$INSTDIR\pygraphviz-1.3.1-cp27-none-win_amd64.whl"
-	
-	prereqs_installed:
+    prereqs_installed:
 
 SectionEnd
 
 Section "Maskgen"
-
-	IfFileExists "$DESKTOP\install_options.txt" +5
-	FileOpen $9 "$DESKTOP\install_options.txt" w
-	FileWrite $9 "$DESKTOP$\r$\n"
-	FileWrite $9 "master"
-    FileClose $9
-	MessageBox MB_OK "To change the installation directory, change line 1 of the text file.$\nTo change the branch change the second line of the text file."
+    SetOutPath "$TEMP"
     
-    ExecWait "notepad.exe $DESKTOP\install_options.txt"
-    FileOpen $9 "$DESKTOP\install_options.txt" r
-    FileRead $9 $USERDIR
-    FileRead $9 $BRANCH
-    FileClose $9
+    File "Prerequisites\ManipulatorCodeNames.txt"
     
-    ${WordReplace} $USERDIR "$\r$\n" "" "+" $USERDIR
-    ${WordReplace} $BRANCH "$\r$\n" "" "+" $BRANCH
-
-	IfFileExists "$USERDIR\maskgen\*.*" +1 +2
-	RMDir /r $USERDIR\maskgen
-
-    SetOutPath $USERDIR
-	StrCpy $CONDA "$PROFILE\Anaconda2\Scripts\conda.exe"
-	StrCpy $PIP "$PROFILE\Anaconda2\Scripts\pip.exe"
-	StrCpy $PYTHON "$PROFILE\Anaconda2\python.exe"
-	
-    inetc::get /POPUP "" /CAPTION "master.zip" "https://github.com/rwgdrummer/maskgen/archive/$BRANCH.zip" "$USERDIR\$BRANCH.zip"
-    Pop $0 # return value = exit code, "OK" if OK
-    MessageBox MB_OK "Download Status: $0" 
-
-    DetailPrint "Extracting Maskgen..."
-    NsUnzip::Extract "$USERDIR\$BRANCH.zip" /END
-	Sleep 5000
-	Rename "$USERDIR\maskgen-$BRANCH" "$USERDIR\maskgen"
-
-    SetOutPath  "$USERDIR\maskgen"
-	ExecWait "$PIP install setuptools"
-	SetOutPath "$USERDIR\maskgen\setuptools-version"
-    ExecWait "$PYTHON setup.py install"
-
-    SetOutPath  "$USERDIR\maskgen\wrapper_plugins\rawphoto_wrapper"
-    ExecWait "$PYTHON setup.py sdist"
-    ExecWait "$PIP install -e ."
-
-    SetOutPath  "$USERDIR\maskgen"
-    ExecWait "$PYTHON setup.py sdist"
-    ExecWait "$PIP install -e ."
-
-	SetOutPath "$USERDIR\maskgen\hp_tool"
-	ExecWait "$PYTHON setup.py install"
-
-	SetOutPath "$USERDIR"
-	File "Prerequisites\jtprefs.py"
-	ExecWait "$PYTHON jtprefs.py"
-	Delete "$USERDIR\jtprefs.py"
-
-	Delete "$USERDIR\$BRANCH.zip"
+    File "MaskgenInstallScript.py"
+    ExecWait "python $\"$TEMP\MaskgenInstallScript.py$\""
+    Delete "$TEMP\MaskgenInstallScript.py"
     
-    MessageBox MB_OK "If this is your first installation, you will need to$\nrestart your computer to use the HP Tool."
+    File "Prerequisites\jtprefs.py"
+    ; ExecWait "python $\"$USERDIR\maskgen\scripts\python\jtprefs.py$\""
+    ExecWait "python $\"$TEMP\jtprefs.py$\""
+    Delete "$TEMP\jtprefs.py"
+
+    Delete "$DESKTOP\maskgen.log"
 
 SectionEnd

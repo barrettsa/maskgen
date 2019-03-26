@@ -1,51 +1,67 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
+
 from PIL import Image
 import cv2
 import numpy as np
 import os
+import inspect
 import subprocess
 from pkg_resources import iter_entry_points
 from cachetools import LRUCache
-from cachetools import cached
 from threading import RLock
 import logging
 import os
 import png
 import exif
 from numpngw import write_png
+from maskgen import config
 
-image_lock = RLock()
-image_cache = LRUCache(maxsize=24)
+Image.MAX_IMAGE_PIXELS = 10000000000
+
+
+image_lock = config.getAndSet('image_lock', RLock())
+image_cache = config.getAndSet('image_cache', LRUCache(maxsize=24))
 
 try:
-    from tifffile import TiffFile, imsave
+    from skimage.external.tifffile import TiffFile,imsave
 except ImportError:
-    def imsave(filename, img, **newargs):
-        import scipy.misc
-        scipy.misc.imsave(filename, img)
-
-
-    class TiffFile:
-        def __init__(self, filename):
-            pass
-
-        def __array__(self):
-            return []
-
-        def __exit__(self, x, y, z):
-            return []
-
-        def __enter__(self):
-            return []
-
-def _processRaw(raw, isMask=False,args=None):
-    import rawpy
     try:
+        from tifffile import TiffFile, imsave
+    except ImportError:
+        def imsave(filename, img, **newargs):
+            import scipy.misc
+            scipy.misc.imsave(filename, img)
+
+
+        class TiffFile:
+            def __init__(self, filename):
+                pass
+
+            def __array__(self):
+                return []
+
+            def __exit__(self, x, y, z):
+                return []
+
+            def __enter__(self):
+                return []
+
+
+def _processRaw(filename, raw, isMask=False, args=None):
+    import rawpy
+    def _open_from_rawpy(raw,args=None):
         if args is not None and 'Bits per Channel' in args:
             bits = int(args['Bits per Channel'])
         else:
             bits = 8
-        use_camera_wb = args is not None and \
-                        'White Balance' in args and \
+        use_camera_wb = args is None or \
+                        'White Balance' not in args or \
                         args['White Balance'] == 'camera'
         use_auto_wb = args is not None and \
                       'White Balance' in args and \
@@ -75,40 +91,63 @@ def _processRaw(raw, isMask=False,args=None):
                        'LINEAR': rawpy.DemosaicAlgorithm.LINEAR,
                        'VCD_MODIFIED_AHD': rawpy.DemosaicAlgorithm.VCD_MODIFIED_AHD,
                        'VNG': rawpy.DemosaicAlgorithm.VNG}
-            return ImageWrapper(raw.postprocess(demosaic_algorithm=mapping[v],
+            return raw.postprocess(demosaic_algorithm=mapping[v],
                                                 output_bps=bits,
                                                 use_camera_wb=use_camera_wb,
                                                 use_auto_wb=use_auto_wb,
-                                                output_color=colorspace), to_mask=isMask)
+                                                output_color=colorspace)
 
-        return ImageWrapper(raw.postprocess(output_bps=bits,
+        return raw.postprocess(output_bps=bits,
                                             use_camera_wb=use_camera_wb,
                                             use_auto_wb=use_auto_wb,
-                                            output_color=colorspace), to_mask=isMask)
+                                            output_color=colorspace)
+    try:
+        rawdata = _open_from_rawpy(raw,args=args)
+        return ImageWrapper(rawdata,to_mask=isMask,isRaw=True)
     except Exception as e:
         logging.getLogger('maskgen').error('Raw Open: ' + str(e))
         return None
 
 
+def openImageMaskFile(directory, filename):
+    return openImageFile(os.path.join(directory, filename), isMask=True).to_array()
+
+
 def openRaw(filename, isMask=False, args=None):
+    logger = logging.getLogger('maskgen')
     try:
         import rawpy
         with rawpy.imread(filename) as raw:
             if type(args) == list:
                 result = {}
                 for argitem in args:
-                    rawim = _processRaw(raw, isMask=isMask,args=argitem)
+                    rawim = _processRaw(filename, raw, isMask=isMask, args=argitem)
                     if rawim is not None:
                         if 'outputname' in argitem:
                             rawim.save(argitem['outputname'], format='PNG')
                             result[argitem['outputname']] = rawim
                         else:
                             result[str(argitem)] = rawim
-                return result
-            return _processRaw(raw)
+            else:
+                result = _processRaw(filename,raw,args=args)
+            if logger.isEnabledFor(logging.DEBUG):
+                logging.debug('Opened {} as raw'.format(filename))
+            return result
     except Exception as e:
-        logging.getLogger('maskgen').error('Raw Open: ' + str(e))
+        logger.error('Raw Open: ' + str(e))
         return None
+
+
+def _openCV2(filename):
+    img = cv2.imread(filename, flags=cv2.IMREAD_UNCHANGED)
+    if len(img.shape) > 2:
+        if img.shape[2] > 3:
+            result = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+        else:
+            result = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    else:
+        result = img
+    return result
 
 def openTiff(filename, isMask=False, args=None):
     raw = openRaw(filename, isMask=isMask, args=args)
@@ -119,14 +158,14 @@ def openTiff(filename, isMask=False, args=None):
                 for page in tiffdata:
                     for tag in page.tags.values():
                         t, v = tag.name, tag.value
-                        if t.startswith('compress'):
-                            info['compress'] = v
+                        info[t] = v
         except:
             pass
         try:
-            nonRaw = ImageWrapper(cv2.cvtColor(cv2.imread(filename, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+            nonRaw = ImageWrapper(_openCV2(filename),
                                   info=info,
-                                  to_mask=isMask)
+                                  to_mask=isMask,
+                                  filename=filename)
             if raw is not None and raw.size[0] > nonRaw.size[0] and raw.size[1] > nonRaw.size[1]:
                 return raw
             return nonRaw
@@ -135,44 +174,65 @@ def openTiff(filename, isMask=False, args=None):
     return raw
 
 
-def wand_image_extractor(filename, isMask=False):
+def wand_image_extractor(filename, isMask=False,args=None):
     import pgmagick
     im = pgmagick.Image(filename)
     myPilImage = Image.new('RGB', (im.GetWidth(), im.GetHeight()))
     myPilImage.fromstring(im.GetData())
-    return ImageWrapper(np.asarray(myPilImage), mode=myPilImage.mode, info=myPilImage.info, to_mask=isMask)
+    return ImageWrapper(np.asarray(myPilImage), mode=myPilImage.mode, info=myPilImage.info,
+                        to_mask=isMask,
+                        filename=filename)
 
-
-def pdf2_image_extractor(filename, isMask=False):
+def pdf2_image_extractor(filename, isMask=False,args=None):
     import PyPDF2
     import io
     from PyPDF2 import generic
-    with open(filename, "rb") as f:
-        input1 = PyPDF2.PdfFileReader(f)
-        page0 = input1.getPage(0)
+    def find_image(page0):
         xObject = page0['/Resources']['/XObject'].getObject()
+        rotate = page0['/Rotate'] if '/Rotate' in page0 else 0
         for obj in xObject:
             if xObject[obj]['/Subtype'] == '/Image':
                 size = (xObject[obj]['/Width'], xObject[obj]['/Height'])
-                if xObject[obj]['/ColorSpace'] == '/DeviceRGB':
-                    mode = "RGB"
-                else:
-                    mode = "P"
-                hasJPEG = len([x for x in xObject[obj]['/Filter'] if x == '/DCTDecode']) > 0
-                if hasJPEG:
+                mode = 'RGB'
+                if '/ColorSpace' in xObject[obj]:
+                    mode = "P" if xObject[obj]['/ColorSpace'] == '/DeviceGray' else mode
+                    mode = "CMYK" if xObject[obj]['/ColorSpace'] == '/DeviceCMYK' else mode
+                hasJPEGOld = len([x for x in xObject[obj]['/Filter'] if x == '/DCTDecode']) > 0
+                hasJPEG = xObject[obj]['/Filter'] in ['/DCTDecode', '/JBIG2Decode']
+                #isBig =  xObject[obj]['/Filter'] == '/JBIG2Decode'
+                if hasJPEG or hasJPEGOld:
                     if type(xObject[obj]['/Filter']) == generic.ArrayObject:
                         xObject[obj].update({generic.NameObject('/Filter'):
                                                  generic.ArrayObject([x for x in xObject[obj]['/Filter']
                                                                       if x not in ['/DCTDecode', '/JBIG2Decode']])})
-                    im = Image.open(io.BytesIO(bytearray(xObject[obj].getData())))
-                    return ImageWrapper(np.asarray(im), mode=im.mode, info=im.info, to_mask=isMask)
+                    try:
+                        im = Image.open(io.BytesIO(bytearray(xObject[obj]._data if not hasJPEGOld else xObject[obj].getData()) ))
+                    except Exception as e:
+                        continue
+                    ima = np.asarray(im)
+                    if rotate != 0:
+                        ima = np.rot90(ima, -rotate / 90)
+                    return ImageWrapper(ima, mode=im.mode, info=im.info, to_mask=isMask, filename=filename)
+                elif xObject[obj]['/Filter'] == '/FlateDecode':
+                    ima = Image.frombytes(mode, size, xObject[obj]._data)
+                    if rotate != 0:
+                        ima = np.rot90(ima, -rotate / 90)
+                    return ImageWrapper(ima, mode=mode, to_mask=isMask, filename=filename)
+            else:
+                r = find_image(xObject[obj])
+                if r is not None:
+                    return r
+
+    with open(filename, "rb") as f:
+        input1 = PyPDF2.PdfFileReader(f)
+        return find_image(input1.getPage(0))
+
     return None
 
 
-def convertToPDF(filename, isMask=False):
+def convertToPDF(filename, isMask=False,args=None):
     import platform
-    prefix = filename[0:filename.rfind('.')]
-    newname = prefix + '.png'
+    newname = os.path.splitext(filename)[0] + '.png'
     if "Darwin" in platform.platform():
         if not os.path.exists(newname):
             with open(os.devnull, 'w') as fp:
@@ -180,59 +240,70 @@ def convertToPDF(filename, isMask=False):
     with open(newname, 'rb') as f:
         im = Image.open(f)
         im.load()
-        return ImageWrapper(np.asarray(im), mode=im.mode, info=im.info, to_mask=isMask)
-    return None
+        return ImageWrapper(np.asarray(im), mode=im.mode, info=im.info, to_mask=isMask,filename=filename)
 
 
 def getProxy(filename):
-    proxyname = filename[0:filename.rfind('.')] + '_proxy.png'
+    proxyname = os.path.splitext(filename)[0] + '_proxy.png'
     if os.path.exists(proxyname):
         return proxyname
     return None
-
 
 def defaultOpen(filename, isMask=False, args=None):
     with open(filename, 'rb') as f:
         im = Image.open(f)
         im.load()
         if im.format == 'TIFF' and filename.lower().find('tif') < 0:
-            raw = openTiff(filename, isMask=isMask,args=args)
+            raw = openTiff(filename, isMask=isMask, args=args)
             if raw is not None and raw.size[0] > im.size[0] and raw.size[1] > im.size[1]:
                 return raw
-    result = ImageWrapper(np.asarray(im), mode=im.mode, info=im.info, to_mask=isMask)
+    result = ImageWrapper(np.asarray(im), mode=im.mode, info=im.info, to_mask=isMask,filename=filename)
     return None if result.size == (0, 0) else result
 
-
-def readPNG(filename, isMask=False):
+def readPNG(filename, isMask=False, args=None):
     import itertools
-    with open(filename,'rb') as f:
+    try:
+        return ImageWrapper(_openCV2(filename), filename=filename)
+    except Exception as ex:
         exifdata = exif.getexif(filename)
         if 'Bit Depth' in exifdata and exifdata['Bit Depth'] == '16':
-            pngdata = png.Reader(file=f).asDirect()
-            image_2d = np.vstack(itertools.imap(np.uint16, pngdata[2]))
-            image_3d = np.reshape(image_2d,
-                                     (pngdata[1], pngdata[0], image_2d.shape[1]/pngdata[0]))
-            result = ImageWrapper(image_3d, to_mask=isMask)
+            with open(filename, 'rb') as f:
+                pngdata = png.Reader(file=f).asDirect()
+                image_2d = np.vstack(itertools.imap(np.uint16, pngdata[2]))
+                shape = image_2d.shape[1] / pngdata[0]
+                if shape > 1:
+                    image_3d = np.reshape(image_2d,
+                                          (pngdata[1], pngdata[0], image_2d.shape[1] / pngdata[0]))
+                    return ImageWrapper(image_3d, to_mask=isMask,filename=filename)
+                else:
+                    return ImageWrapper(image_2d,filename=filename)
         else:
-            im = Image.open(f)
-            im.load()
-            result = ImageWrapper(np.asarray(im), mode=im.mode, info=im.info, to_mask=isMask)
-    return result
+            raise ex
 
-def proxyOpen(filename, isMask=False):
+
+
+def proxyOpen(filename, isMask=False, args=None):
     proxyname = getProxy(filename)
     if proxyname is not None:
-        return openImageFile(filename, isMask=isMask)
+        return openImageFile(proxyname, isMask=isMask)
     return None
 
-
 # openTiff supports raw files as well
-file_registry = [('png', [readPNG]), ('pdf', [pdf2_image_extractor, wand_image_extractor, convertToPDF]), ('', [defaultOpen]),
-                 ('', [openTiff]), ('', [proxyOpen])]
+file_registry = [('png', [readPNG]),
+                 ('pdf', [wand_image_extractor, pdf2_image_extractor,  convertToPDF]),
+                 ('cr2', [openRaw]),
+                 ('nef', [openRaw]),
+                 ('dng', [openRaw]),
+                 ('arw', [openRaw]),
+                 ('raf', [openRaw]),
+                 ('',    [defaultOpen, openTiff, proxyOpen])]
 file_write_registry = {}
 
 for entry_point in iter_entry_points(group='maskgen_image', name=None):
-    file_registry.insert(0, (entry_point.name, [entry_point.load()]))
+    try:
+        file_registry.insert(0, (entry_point.name, [entry_point.load()]))
+    except Exception as ex:
+        logging.getLogger('maskgen').error('Cannot load {} due to {}'.format(entry_point.name,str(ex)))
 
 for entry_point in iter_entry_points(group='maskgen_image_writer', name=None):
     file_write_registry[entry_point.name] = entry_point.load()
@@ -241,7 +312,7 @@ for entry_point in iter_entry_points(group='maskgen_image_writer', name=None):
 def getFromWriterRegistry(format):
     return file_write_registry[format] if format in file_write_registry else None
 
-import inspect
+
 def openFromRegistry(filename, isMask=False, args=None):
     for suffixList in file_registry:
         if suffixList[0] in filename.lower():
@@ -249,15 +320,19 @@ def openFromRegistry(filename, isMask=False, args=None):
                 try:
                     if args is not None:
                         try:
-                            inspect.getcallargs(func,filename, isMask=isMask,args=args)
-                            result = func(filename, isMask=isMask,args=args)
+                            result = func(filename, isMask=isMask, args=args)
                         except Exception as e:
                             result = func(filename, isMask=isMask)
                     else:
                         result = func(filename, isMask=isMask)
                     if result is not None and result.__class__ is not ImageWrapper:
-                        result = ImageWrapper(result[0], mode=result[1])
+                        result = ImageWrapper(result[0], mode=result[1],filename=filename)
                     if result is not None and result.size != (0, 0):
+                        logger = logging.getLogger('maskgen')
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logging.getLogger('maskgen').debug('Opened {} with {}'.format(
+                                filename, func.__name__
+                            ))
                         return result
                 except Exception as e:
                     logging.getLogger('maskgen').info(
@@ -286,8 +361,8 @@ def openImageFile(filename, isMask=False, args=None):
     @rtype: ImageWrapper
     """
     if not os.path.exists(filename):
-        pos = filename.rfind('.')
-        mod_filename = filename[0:pos] + filename[pos:].lower()
+        parts = os.path.splitext(filename)
+        mod_filename = parts[0] + parts[1].lower()
         if os.path.exists(mod_filename):
             filename = mod_filename
     if not os.path.exists(filename):
@@ -321,13 +396,21 @@ def tofloat(img_array):
     return img_array
 
 
-def totype(img_array, type):
-    if img_array.dtype == type or type is None:
+def to_data_type(img_array, data_type):
+    """
+
+    :param img_array:
+    :param data_type:
+    :return:
+    @type img_array: np.ndarray
+    @type data_type: np.dtype or str
+    """
+    if img_array.dtype == data_type or data_type is None:
         return img_array
-    if type == 'uint8':
+    if data_type == 'uint8':
         img_array = tofloat(img_array)
-        img_array = img_array * np.iinfo(type).max
-    return img_array.astype(type)
+        img_array = img_array * np.iinfo(data_type).max
+    return img_array.astype(data_type)
 
 
 def get_mode(image_array):
@@ -344,15 +427,57 @@ def get_mode(image_array):
     else:
         return 'RGB'
 
+def tiff_masssage_args(**args):
+    # some are not support yet
+    TIFF_PHOTOMETRICS = {
+        0: 'miniswhite',
+        1: 'minisblack',
+        2: 'rgb',
+        3: 'palette',
+        4: 'miniswhite', #'mask',
+        5: 'rgb', #'separated',  # CMYK
+        6: 'rgb', #'ycbcr',
+        8: 'rgb', #cielab',
+        9: 'rgb', #'icclab',
+        10: 'rgb', #'itulab',
+        32803: 'cfa',  # Color Filter Array
+        32844: 'logl',
+        32845: 'logluv',
+        34892: 'linear_raw'
+    }
+    result = {}
+    for k,v in args.iteritems():
+        if k == 'compression' and v != 'raw':
+            result['compress'] = v
+        elif k == 'photometric':
+            result['photometric'] = TIFF_PHOTOMETRICS[v]
+        elif k in ['planarconfig','colormap','tile','description','metadata','resolution']:
+            result[k]= v
+    return result
 
+def scale_of_type_change(img,dest_type):
+    itype = np.iinfo(img.dtype)
+    dtype = np.iinfo(dest_type)
+    return float((dtype.max - dtype.min))/(itype.max - itype.min)
+
+def rescale_gray_image(img):
+    return (img.astype('uint16') * scale_of_type_change(img, np.uint16)).astype('uint16')
 
 class ImageWrapper:
     """
-    @type image_array: numpy.array
+    @type image_array: numpy.ndarray
     """
+    def __init__(self, image_array, mode=None, to_mask=False, info=None, filename=None, isRaw=False):
+        """
 
-    def __init__(self, image_array, mode=None, to_mask=False, info=None,filename=None):
-        if str(type(image_array)) == 'ImageWrapper':
+        :param image_array:
+        :param mode:
+        :param to_mask:
+        :param info:
+        :param filename:
+        @type image_array: np.ndarray or ImageWrapper
+        """
+        if type(image_array).__name__ == 'instance' and image_array.__class__.name == 'ImageWrapper':
             self.image_array = image_array.image_array
         else:
             self.image_array = image_array
@@ -360,9 +485,15 @@ class ImageWrapper:
         self.mode = mode if mode is not None else get_mode(image_array)
         self.size = (image_array.shape[1], image_array.shape[0])
         self.filename = filename
+        self.isRaw = isRaw
         if to_mask and self.mode != 'L':
             self.image_array = self.to_mask_array()
-            self.mode='L'
+            self.mode = 'L'
+
+    def file_mtime(self):
+        if self.filename is None or not os.path.exists(self.filename):
+            return 0
+        return os.stat(self.filename).st_mtime
 
     def has_alpha(self):
         return len(self.image_array.shape) == 3 and self.mode.find('A') > 0
@@ -371,7 +502,7 @@ class ImageWrapper:
         return Image.fromarray(self.image_array, mode=self.mode)
 
     def toPIL(self):
-        return Image.fromarray(self.to_rgb(type='uint8').to_array())
+        return Image.fromarray(self.to_rgb(data_type='uint8').to_array())
 
     def to_array(self):
         return np.copy(self.image_array)
@@ -393,8 +524,8 @@ class ImageWrapper:
         img[:, :, 3] = img[:, :, 3] * mask_array
         return ImageWrapper(self.image_array)
 
-    def to_rgb(self, type=None):
-        type = self.image_array.dtype if type is None else type
+    def to_rgb(self, data_type=None):
+        data_type = self.image_array.dtype if data_type is None else data_type
         s = self.image_array.shape
         img = self.convert('RGB')
         if self.mode.find('A') > 0:
@@ -405,10 +536,10 @@ class ImageWrapper:
             for i in range(3):
                 img_array2[:, :, i] = img.image_array[:, :, i] * zeros
             img_array2 = img_array2.astype(self.image_array.dtype)
-            return ImageWrapper(totype(img_array2, type=type), mode='RGB')
+            return ImageWrapper(to_data_type(img_array2, data_type=data_type), mode='RGB')
         elif len(s) == 2:
-            return ImageWrapper(cv2.cvtColor(totype(self.image_array, type), cv2.COLOR_GRAY2RGB), mode='RGB')
-        return ImageWrapper(totype(np.copy(img.image_array), type))
+            return ImageWrapper(cv2.cvtColor(to_data_type(self.image_array, data_type), cv2.COLOR_GRAY2RGB), mode='RGB')
+        return ImageWrapper(to_data_type(np.copy(img.image_array), data_type))
 
     def touint8(self):
         if self.image_array.dtype == 'uint16':
@@ -419,38 +550,54 @@ class ImageWrapper:
             img_array = self.image_array * 256
             self.image_array = img_array.astype('uint8')
 
+    def get_exif(self):
+        if self.filename is not None:
+            return exif.getexif(self.filename)
+        return None
+
     def save(self, filename, **kwargs):
+        """
+
+        :param filename:
+        :param kwargs:
+        :return:
+        @type filename: str
+        """
         self.filename = filename
         if 'format' in kwargs:
-            format = kwargs['format']
+            image_format = kwargs['format']
         elif getFromWriterRegistry(self.mode.lower()):
-            format = self.mode.lower()
+            image_format = self.mode.lower()
         else:
-            format = 'TIFF' if self.image_array.dtype == 'uint16' else 'PNG'
+            image_format = 'TIFF' if filename.lower().endswith('tif') or filename.lower().endswith('tiff') else 'PNG'
         newargs = dict(kwargs)
-        newargs['format'] = format
+        newargs['format'] = image_format
         img_array = self.image_array
-        file_writer = getFromWriterRegistry(format.lower())
+        file_writer = getFromWriterRegistry(image_format.lower())
         if file_writer is not None:
             file_writer(filename, img_array)
             return
         if self.mode == 'F':
             img_array = img_array * 256
             img_array = img_array.astype('uint8')
-        if img_array.dtype == 'uint8' or self.mode == 'L':
-            if format == 'PDF' and self.mode != 'RGB':
+        if img_array.dtype == 'uint8' and self.mode == 'L':
+            if image_format == 'PDF':
                 self.convert('RGB').save(filename, **newargs)
             else:
                 Image.fromarray(img_array).save(filename, **newargs)
             return
         newargs.pop('format')
-        if format == 'PNG' and self.image_array.dtype == 'uint16':
-            write_png(filename,self.image_array)
-            #with open(filename, 'w') as f:
-            #    w = png.Writer(width=img_array.shape[1], height=img_array.shape[0], bitdepth=16)
-            #    w.write(f, img_array.reshape(-1, img_array.shape[1] * img_array.shape[2]).tolist())
+        if image_format == 'PNG':
+            if img_array.dtype == 'uint16':
+               write_png(filename, img_array)
+               return
+            elif self.mode not in ('RGB','RGBA','L','LA'):
+                img_array = ImageWrapper(img_array.astype('uint8')).convert('RGB').image_array
+            Image.fromarray(img_array.astype('uint8')).save(filename, **newargs)
+        elif image_format not in ['TIFF','TIF']:
+            Image.fromarray(img_array.astype('uint8')).save(filename, **newargs)
         else:
-            imsave(filename, self.image_array, **newargs)
+            imsave(filename, img_array, **tiff_masssage_args(**newargs))
         if os.path.exists(filename):
             with image_lock:
                 image_cache[filename] = (self, os.stat(filename).st_mtime)
@@ -476,11 +623,26 @@ class ImageWrapper:
             img_array = img_array[:, :, 0:4]
             return ImageWrapper(np.asarray(Image.fromarray(img_array, mode='RGBA').convert(convert_type_str)),
                                 mode=convert_type_str)
-        if img_array.dtype == 'uint8':
-            return ImageWrapper(np.asarray(Image.fromarray(img_array, mode=self.mode).convert(convert_type_str)),
-                                mode=convert_type_str)
+        try:
+            if img_array.dtype == 'uint8':
+                return ImageWrapper(np.asarray(Image.fromarray(img_array, mode=self.mode).convert(convert_type_str)),
+                                        mode=convert_type_str)
+        except:
+            logging.getLogger('maskgen').debug('Image convert does not support convert type')
+        if self.mode == 'BGR' and convert_type_str == 'RGB':
+            return ImageWrapper(cv2.cvtColor(img_array.astype('unit8'), cv2.COLOR_BGR2RGB), mode='RGB')
+        if self.mode == 'YUV' and convert_type_str == 'RGB':
+            return ImageWrapper(cv2.cvtColor(img_array.astype('unit8'), cv2.COLOR_YUV2RGB), mode='RGB')
+        if self.mode == 'YCrCb' and convert_type_str == 'RGB':
+            return ImageWrapper(cv2.cvtColor(img_array.astype('unit8'), cv2.COLOR_YCrCb2RGB), mode='RGB')
+        if self.mode == 'YCbCr' and convert_type_str == 'RGB':
+            return ImageWrapper(cv2.cvtColor(img_array[:,:,[0,2,1]].astype('unit8'), cv2.COLOR_YCrCb2RGB), mode='RGB')
         if self.mode == 'RGB' and convert_type_str == 'RGBA':
             return ImageWrapper(cv2.cvtColor(img_array, cv2.COLOR_RGB2RGBA), mode='RGBA')
+        if self.mode == 'RGB' and convert_type_str == 'HSV':
+            return ImageWrapper(cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV), mode='HSV')
+        if self.mode == 'HSV' and convert_type_str == 'RGB':
+            return ImageWrapper(cv2.cvtColor(img_array, cv2.COLOR_HSV2RGB), mode='RGB')
         if self.mode == 'RGBA' and convert_type_str == 'RGB':
             return ImageWrapper(cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB), mode='RGB')
         if self.mode == 'L' and convert_type_str == 'RGB':
@@ -529,7 +691,6 @@ class ImageWrapper:
             return ImageWrapper(img_array)
         return mask
 
-
     def to_mask_array(self):
         """
         white = selected, black = unselected
@@ -539,6 +700,7 @@ class ImageWrapper:
         gray_image_temp = self.convert('L')
         if len(s) == 3 and self.mode.find('A') > 0:
             gray_image = 255 * np.ones(gray_image_temp.image_array.shape).astype('uint8')
+            gray_image[gray_image_temp.image_array == 0] = 0
             gray_image[self.image_array[:, :, self.image_array.shape[2] - 1] == 0] = 0
         else:
             gray_image = np.ones(gray_image_temp.image_array.shape).astype('uint8') * 255
@@ -561,11 +723,12 @@ class ImageWrapper:
         """
         s = self.image_array.shape
         if self.mode == 'F':
-            return self
+            return self.convert('RGB').to_16BitGray()
         if len(s) == 2:
-            return ImageWrapper(tofloat(self.image_array))
+            return ImageWrapper(rescale_gray_image(self.to_array()))
         if self.mode == 'LA':
-            return ImageWrapper(self.image_array[:, :, 0] * tofloat(self.image_array[:, :, 1]).astype('float32'))
+            return ImageWrapper((rescale_gray_image(self.image_array[:, :, 0]) \
+                                * tofloat(self.image_array[:, :, 1])).astype('uint16'))
         rgbaimg = self.convert('RGBA') if self.mode != 'RGBA' else self
         r, g, b = rgbaimg.image_array[:, :, 0], rgbaimg.image_array[:, :, 1], rgbaimg.image_array[:, :, 2]
         if equalize_colors:

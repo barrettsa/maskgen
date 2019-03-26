@@ -1,15 +1,19 @@
-"""
-PAR Government Systems
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
 
-compress_as takes in two JPEG images, and compresses the first with the q tables of the second
+# Compress_as takes in two JPEG images, and compresses the first with the q tables of the second
 
-"""
 import maskgen
 import logging
 
 
 
-def cs_save_as(img,source, target, donor, qTables,rotate,quality):
+def cs_save_as(img,source, target, donor, qTables,rotate,quality, color_mode):
     import os
     import tempfile
     from PIL import Image
@@ -17,6 +21,7 @@ def cs_save_as(img,source, target, donor, qTables,rotate,quality):
     from maskgen.jpeg.utils import get_subsampling, parse_tables, sort_tables, check_rotate
     import maskgen.exif
     import maskgen
+    from maskgen import image_wrap
 
     """
     Saves image file using quantization tables
@@ -46,6 +51,12 @@ def cs_save_as(img,source, target, donor, qTables,rotate,quality):
         im = Image.fromarray(np.asarray(img.convert('RGB')))
     else:
         im = Image.fromarray(np.asarray(img))
+
+    if color_mode == 'from donor':
+        donor_img = image_wrap.openImageFile(donor)
+        if donor_img.mode != img.mode:
+            im = Image.fromarray(np.asarray(img.convert(donor_img.mode)))
+
     analysis = None
     if rotate:
       im,analysis = check_rotate(im,donor)
@@ -59,7 +70,7 @@ def cs_save_as(img,source, target, donor, qTables,rotate,quality):
         im.save(target)
     width, height = im.size
     maskgen.exif.runexif(['-overwrite_original', '-q', '-all=', target])
-    maskgen.exif.runexif([ '-P', '-q', '-m', '-tagsFromFile', donor, '-all:all>all:all', '-unsafe', target])
+    maskgen.exif.runexif([ '-overwrite_original', '-P', '-q', '-m', '-tagsFromFile', donor, '-all:all>all:all', '-unsafe', target])
 
     # Preview is not well standardized in JPG (unlike thumbnail), so it doesn't always work.
     if prevTable:
@@ -111,14 +122,12 @@ def transform(img,source,target, **kwargs):
 
     donor = kwargs['donor']
     rotate = kwargs['rotate'] == 'yes'
-   # if 'quality' in kwargs:
-    #    quality = str(kwargs['quality'])
-    #    if quality.startswith('+'):
     quality = int(kwargs['quality']) if 'quality' in kwargs else 0
+    color_mode = kwargs['color mode'] if 'color mode' in kwargs else 'from donor'
     
     tables_zigzag = parse_tables(donor)
     tables_sorted = sort_tables(tables_zigzag)
-    analysis = cs_save_as(img,source, target, donor, tables_sorted,rotate, quality)
+    analysis = cs_save_as(img,source, target, donor, tables_sorted,rotate, quality, color_mode)
     
     return analysis , None
     
@@ -143,6 +152,12 @@ def operation():
                     'type': 'int[0:100]',
                     'defaultvalue': '0',
                     'description': "Quality Factor overrides the donor.  The default value of 0 indicates using the donor image's quality factor."
+                },
+                'color mode':{
+                    'type': 'list',
+                    'values': ['from donor', 'from source'],
+                    'defaultvalue': 'from donor',
+                    'description': "Which image's color space will inform the color space of the output file."
                 }
             },
             'transitions': [

@@ -1,15 +1,28 @@
-from os.path import expanduser
-import csv
-import platform
-import os
-from maskgen_loader import MaskGenLoader
-from json import JSONEncoder
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
+
+
 import json
 import logging
+import os
+from json import JSONEncoder
+
+from maskgen.config import global_config
+from maskgen_loader import MaskGenLoader
+from maskgen.support import getValue
+
 
 class OperationEncoder(JSONEncoder):
     def default(self, o):
         return o.__dict__
+
+def strip_version(version):
+    return '.'.join(version.split('.')[:2]) if version is not None else ''
 
 def getFileName(fileName, path=None):
     import sys
@@ -24,6 +37,16 @@ def getFileName(fileName, path=None):
         if os.path.exists(newNanme):
             logging.getLogger('maskgen').info( 'Loading ' + newNanme)
             return newNanme
+
+
+def extract_default_values(operation_arguments):
+    """
+    given argument definitions, return operation name: default value if default is present
+    :param operation_arguments:
+    :return:
+     @type dict
+    """
+    return {k:v['defaultvalue'] for k,v in operation_arguments.iteritems() if 'defaultvalue' in v}
 
 class ProjectProperty:
     description = None
@@ -48,7 +71,7 @@ class ProjectProperty:
 
     def __init__(self, name='', type='', operations=None, parameter=None, description=None,
                  information=None, value=None, values=None, rule=None, node=False, readonly=False,mandatory=True,
-                 nodetype=None,semanticgroup=False,defaultvalue = None):
+                 nodetype=None,semanticgroup=False,defaultvalue = None,includedonors=False):
         self.name = name
         self.type = type
         self.operations = operations
@@ -64,6 +87,7 @@ class ProjectProperty:
         self.nodetype = nodetype
         self.semanticgroup = semanticgroup
         self.defaultvalue = defaultvalue
+        self.includedonors = includedonors
 
 
 class Operation:
@@ -83,6 +107,7 @@ class Operation:
     maskTransformFunction = None
     compareOperations = None
     parameter_dependencies = None
+    donor_processor = None
     """
     parameter_dependencies is a dictionary: { 'parameter name' : { 'parameter value' : 'dependenent parameter name'}}
     If the parameter identitied by parameter name has a value if 'parameter value' then the parameter identified by
@@ -136,12 +161,13 @@ class Operation:
     @type compareparameters: dict
     @type parameter_dependencies: dict
     @type maskTransformFunction:dict
+    @type donor_processor: str
     """
 
-    def __init__(self, name='', category='', includeInMask=False, rules=list(), optionalparameters=dict(),
+    def __init__(self, name='', category='', includeInMask={"default": False}, rules=list(), optionalparameters=dict(),
                  mandatoryparameters=dict(), description=None, analysisOperations=list(), transitions=list(),
                  compareparameters=dict(),generateMask = "all",groupedOperations=None, groupedCategories = None,
-                 maskTransformFunction=None,parameter_dependencies = None):
+                 maskTransformFunction=None,parameter_dependencies = None, qaList=None,donor_processor=None):
         self.name = name
         self.category = category
         self.includeInMask = includeInMask
@@ -157,6 +183,22 @@ class Operation:
         self.groupedCategories = groupedCategories
         self.maskTransformFunction = maskTransformFunction
         self.parameter_dependencies = parameter_dependencies
+        self.qaList = qaList
+        self.donor_processor = donor_processor
+        self.trigger_arguments = self._getTriggerUpdateArguments()
+
+    def _getTriggerUpdateArguments(self):
+        names = set()
+        for k,v in self.mandatoryparameters.iteritems():
+            if getValue(v,'trigger mask',False):
+                names.add(k)
+        for k,v in self.optionalparameters.iteritems():
+            if getValue(v,'trigger mask',False):
+                names.add(k)
+        return names
+
+    def getTriggerUpdateArguments(self):
+        return self.trigger_arguments
 
     def recordMaskInComposite(self,filetype):
         if filetype in self.includeInMask :
@@ -164,6 +206,15 @@ class Operation:
         if 'default' in self.includeInMask :
             return 'yes' if self.includeInMask ['default'] else 'no'
         return 'no'
+
+    def getParameterValuesForType(self, param_name, type):
+        param = getValue(self.mandatoryparameters,param_name, getValue(self.optionalparameters,param_name,{}))
+        return getValue(param,type +':values', getValue(param,'values'),[] )
+
+    def getDonorProcessor(self, default_processor = None):
+        if  self.donor_processor is not None:
+            return getRule(self.donor_processor)
+        return getRule(default_processor)
 
     def getConvertFunction(self):
         if 'convert_function' in self.compareparameters:
@@ -201,8 +252,14 @@ def getOperation(name, fake = False, warning=True):
          'video':'maskgen.mask_rules.video_donor',
          'audio': 'maskgen.mask_rules.audio_donor',
          })
-    if name not in getMetDataLoader().operations and warning:
-        logging.getLogger('maskgen').warning( 'Requested missing operation ' + str(name))
+    if name not in getMetDataLoader().operations:
+        root_name = name.split('::')[0]
+        if root_name == name:
+            if warning:
+                logging.getLogger('maskgen').warning( 'Requested missing operation ' + str(name))
+        else:
+            return getOperation(root_name,fake=fake,warning=warning)
+
     return getMetDataLoader().operations[name] if name in getMetDataLoader().operations else (Operation(name='name', category='Bad') if fake else None)
 
 
@@ -224,7 +281,7 @@ def getPropertiesBySourceType(source):
     return getMetDataLoader().node_properties[source]
 
 def getSoftwareSet():
-    return getMetDataLoader().softwareset
+    return getMetDataLoader().software_set
 
 
 def saveJSON(filename):
@@ -236,6 +293,12 @@ def saveJSON(filename):
 
 
 def loadProjectPropertyJSON(fileName):
+    """
+
+    :param fileName:
+    :return:
+    @rtype: list of ProjectProperty
+    """
     res = list()
     fileName = getFileName(fileName)
     with open(fileName, 'r') as f:
@@ -254,18 +317,26 @@ def loadProjectPropertyJSON(fileName):
                                                 mandatory=prop['mandatory'] if 'mandatory' in prop else False,
                                                 semanticgroup=prop['semanticgroup'] if 'semanticgroup' in prop else False,
                                                 nodetype=prop['nodetype'] if 'nodetype' in prop else None,
-                                                defaultvalue=prop['defaultvalue'] if 'defaultvalue' in prop else None))
+                                                defaultvalue=prop['defaultvalue'] if 'defaultvalue' in prop else None,
+                                                includedonors=prop['includedonors'] if 'includedonors' in prop else False))
     return res
 
 
 def loadOperationJSON(fileName):
-    operations = {}
+    """
+
+    :param fileName:
+    :return:
+    @rtype: dict of str:Operation
+    """
+    from collections import OrderedDict
+    operations = OrderedDict()
     fileName = getFileName(fileName)
     with open(fileName, 'r') as f:
         ops = json.load(f)
         for op in ops['operations']:
             operations[op['name']] = Operation(name=op['name'], category=op['category'], includeInMask=op['includeInMask'],
-                                        rules=op['rules'], optionalparameters=op['optionalparameters'],
+                                        rules=op['rules'], optionalparameters=op['optionalparameters'] if 'optionalparameters' in op else {},
                                         mandatoryparameters=op['mandatoryparameters'],
                                         description=op['description'] if 'description' in op else None,
                                         generateMask=op['generateMask'] if 'generateMask' in op else "all",
@@ -275,7 +346,9 @@ def loadOperationJSON(fileName):
                                         compareparameters=op[
                                             'compareparameters'] if 'compareparameters' in op else dict(),
                                         maskTransformFunction=op['maskTransformFunction'] if 'maskTransformFunction' in op else None,
-                                        parameter_dependencies=op['parameter_dependencies'] if 'parameter_dependencies' in op else None)
+                                        parameter_dependencies=op['parameter_dependencies'] if 'parameter_dependencies' in op else None,
+                                        qaList=op['qaList'] if 'qaList' in op else None,
+                                        donor_processor=op['donor_processor'] if 'donor_processor' in op else None)
     return operations, ops['filtergroups'] if 'filtergroups' in ops else {}, ops['version'] if 'version' in ops else '0.4.0308.db2133eadc', \
          ops['node_properties'] if 'node_properties' in ops else {}
 
@@ -294,7 +367,7 @@ def insertCustomRule(name,func):
 def returnNoneFunction(*arg,**kwargs):
     return None
 
-def getRule(name, globals={}, noopRule=returnNoneFunction):
+def getRule(name, globals={}, noopRule=returnNoneFunction, default_module=None):
     if name is None:
         return noopRule
     import importlib
@@ -303,11 +376,17 @@ def getRule(name, globals={}, noopRule=returnNoneFunction):
         return customRuleFunc[name]
     else:
         if '.' not in name:
+            mod_name = default_module
+            func_name = name
             func = globals.get(name)
             if func is None:
-                return noopRule
-            return func
-        mod_name, func_name = name.rsplit('.', 1)
+                if default_module is None:
+                    logging.getLogger('maskgen').error('Rule Function {} not found'.format(name))
+                    return noopRule
+            else:
+                return func
+        else:
+            mod_name, func_name = name.rsplit('.', 1)
         try:
             mod = importlib.import_module(mod_name)
             func = getattr(mod, func_name)
@@ -335,9 +414,10 @@ def getFilters(filtertype):
     else:
         return {}
 
-def _loadSoftware( fileName):
+def _load_software_from_resource(fileName):
     fileName = getFileName(fileName)
-    softwareset = {'image': {}, 'video': {}, 'audio': {},'zip': {}}
+    software_set = {'image': {}, 'video': {}, 'audio': {},'zip': {}, 'collection':{}}
+    category_set = {'gan': [], 'other': []}
     with open(fileName) as f:
         line_no = 0
         for l in f.readlines():
@@ -350,43 +430,53 @@ def _loadSoftware( fileName):
                 logging.getLogger('maskgen').error(
                     'Invalid software description on line ' + str(line_no) + ': ' + l)
             software_type = columns[0].strip()
-            software_name = columns[1].strip()
-            versions = [x.strip() for x in columns[2:] if len(x) > 0]
-            if software_type not in ['both', 'image', 'video', 'audio', 'all']:
+            software_name = columns[2].strip()
+            software_category = columns[1].strip().lower()
+            versions = [strip_version(x.strip()) for x in columns[3:] if len(x) > 0]
+            if software_type not in ['both', 'image', 'video', 'audio', 'all', 'collection']:
                 logging.getLogger('maskgen').error('Invalid software type on line ' + str(line_no) + ': ' + l)
             elif len(software_name) > 0:
                 types = ['image', 'video', 'zip'] if software_type == 'both' else [software_type]
                 types = ['image', 'video', 'audio', 'zip'] if software_type == 'all' else types
                 types = ['video', 'audio'] if software_type == 'audio' else types
                 types = ['zip'] if software_type == 'zip' else types
+                types = ['collection'] if software_type == 'collection' else types
                 for stype in types:
-                    softwareset[stype][software_name] = versions
-    return softwareset
+                    software_set[stype][software_name] = versions
+            category_set[software_category].append(software_name)
+    return {'software_set': software_set, 'category_set': category_set}
 
 class MetaDataLoader:
     version = ''
-    softwareset = {}
+    software_set = {}
+    software_category_set = {}
     operations = {}
     filters = {}
     operationsByCategory = {}
-    projectProperties = {}
+    node_properties = {}
 
     def __init__(self):
-        self.operations , self.filters, self.operationsByCategory = self.loadOperations('operations.json')
-        self.softwareset = self.loadSoftware('software.csv')
-        self.projectProperties = self.loadProjectProperties('project_properties.json')
+        self.reload()
 
-    def loadSoftware(self, fileName):
-        self.softwareset = _loadSoftware(fileName)
-        return self.softwareset
+    def reload(self):
+        self.operations, self.filters, self.operationsByCategory, self.node_properties, self.operation_version = self._load_operations('operations.json')
+        self.software_set, self.software_category_set = self._load_software('software.csv')
+        self.projectProperties = self._load_project_properties('project_properties.json')
+        self.manipulator_names = self._load_manipulators('ManipulatorCodeNames.txt')
+
+    def _load_software(self, fileName):
+        sets = _load_software_from_resource(fileName)
+        softwareset = sets['software_set']
+        categoryset = sets['category_set']
+        return softwareset, categoryset
 
     def merge(self,fileName):
-        softwareset = _loadSoftware(fileName)
+        softwareset = _load_software_from_resource(fileName)['software_set']
         bytesOne = {}
         bytesTwo = {}
         namesOne = {}
         namesTwo = {}
-        for atype,names in self.softwareset.iteritems():
+        for atype,names in self.software_set.iteritems():
             for name in names:
                 bytesOne[name] = atype
             for name,versions in names.iteritems():
@@ -408,44 +498,120 @@ class MetaDataLoader:
                 logging.getLogger('maskgen').warn( 'missing ' + str(atype) + ' in ' + name)
 
 
-    def loadProjectProperties(self, fileName):
+    def _load_manipulators(self, filename):
+        file = getFileName(filename)
+        if file is not None:
+            if os.path.exists(file):
+                with open(file, 'r') as fp:
+                    return [name.strip() for name in fp.readlines() if len(name) > 1]
+
+    def _load_project_properties(self, fileName):
+        """
+
+        :param fileName:
+        :return:
+        @rtype: list ProjectProperty
+        """
         loadCustomRules()
-        self.projectProperties = loadProjectPropertyJSON(fileName)
-        return self.projectProperties
+        projectProperties = loadProjectPropertyJSON(fileName)
+        return projectProperties
 
-    def loadOperations(self,fileName):
-        self.operations, self.filters, self.version, self.node_properties = loadOperationJSON(fileName)
-        logging.getLogger('maskgen').info('Loaded operation version ' + self.version)
-        self.operationsByCategory = {}
-        for op, data in self.operations.iteritems():
+    def _load_operations(self, fileName):
+        operations, filters, version, node_properties = loadOperationJSON(fileName)
+        logging.getLogger('maskgen').info('Loaded operation version ' + version)
+        operationsByCategory = {}
+        for op, data in operations.iteritems():
             category = data.category
-            if category not in self.operationsByCategory:
-                self.operationsByCategory[category] = []
-                self.operationsByCategory[category].append(op)
-        return self.operations, self.filters, self.operationsByCategory
+            if category not in operationsByCategory:
+                operationsByCategory[category] = []
+            operationsByCategory[category].append(op)
+        return operations, filters, operationsByCategory, node_properties, version
 
+    def propertiesToCSV(self, filename):
+        import csv
+        csv.register_dialect('unixpwd', delimiter=',', quoting=csv.QUOTE_MINIMAL)
+        with open(filename, 'w') as fp:
+            fp_writer = csv.writer(fp)
+            fp_writer.writerow(['JSON Name', 'Full Name', 'level', 'description', 'type', 'operations'])
+            for property in self.projectProperties:
+                opdata = [
+                    property.name,
+                    property.description,
+                    'semantic group' if property.semanticgroup else 'node' if property.node else 'project',
+                    property.information,
+                    property.type,
+                    ' '.join(property.operations) if property.operations is not None else ''
+                ]
+                try:
+                    fp_writer.writerow(opdata)
+                except:
+                    print ' '.join(opdata)
 
-global metadataLoader
-metadataLoader = {}
+    def operationsToCSV(self,filename):
+        import csv
+        csv.register_dialect('unixpwd', delimiter=',', quoting=csv.QUOTE_MINIMAL)
+        with open(filename,'w') as fp:
+            fp_writer = csv.writer(fp)
+            fp_writer.writerow(['category','operation','description','transitions','argument1','argument1 description'])
+            for cat, ops in self.operationsByCategory.iteritems():
+                for opname in ops:
+                    op = self.operations[opname]
+                    opdata = [
+                        cat,
+                        op.name,
+                        op.description,
+                        ' '.join(op.transitions),
+                    ]
+                    for name, val in op.mandatoryparameters.iteritems():
+                        opdata.extend([name, val['description']])
+                    for name, val in op.optionalparameters.iteritems():
+                        opdata.extend([name, val['description']])
+                    try:
+                        fp_writer.writerow(opdata)
+                    except:
+                        print ' '.join(opdata)
+
+    def getProperty(self, propertyname):
+        for prop in self.projectProperties:
+            if propertyname == prop.name:
+                return prop
+
+def getProjectProperty(name, prop_type):
+    """
+
+    :param name: name of property
+    :param prop_type: one of 'semanticgroup' or 'node' or 'project'
+    :return: ProjectProperty
+    @type name: str
+    @type prop_type: str
+    @rtype: list of ProjectProperty
+    """
+    for prop in getProjectProperties():
+        if (prop.description == name or prop.name == name) and \
+                ((prop.semanticgroup and prop_type == 'semanticgroup') or
+                 (prop.node and prop_type == 'node') or (prop_type == 'project'
+                 and not (prop.node or prop.semanticgroup))):
+            return prop
+    return None
 
 
 def toSoftware(columns):
     return [x.strip() for x in columns[1:] if len(x) > 0]
 
-def getOS():
-    return platform.system() + ' ' + platform.release() + ' ' + platform.version()
-
 def getMetDataLoader():
-    global metadataLoader
-    if 'l' not in metadataLoader:
-        metadataLoader['l'] = MetaDataLoader()
-    return metadataLoader['l']
+    """
+    :return:
+    @rtype: MetaDataLoader
+    """
+    if 'metadataLoader' not in global_config:
+        global_config['metadataLoader'] = MetaDataLoader()
+    return global_config['metadataLoader']
 
 def operationVersion():
     return getMetDataLoader().version
 
 def validateSoftware(softwareName, softwareVersion):
-    for software_type, typed_software_set in getMetDataLoader().softwareset.iteritems():
+    for software_type, typed_software_set in getMetDataLoader().software_set.iteritems():
         if softwareName in typed_software_set and softwareVersion in typed_software_set[softwareName]:
             return True
     return False
@@ -505,15 +671,15 @@ class SoftwareLoader:
     def get_names(self, software_type):
         if software_type is None:
             return []
-        return list(getMetDataLoader().softwareset[software_type].keys())
+        return list(getMetDataLoader().software_set[software_type].keys())
 
     def get_versions(self, name, software_type=None, version=None):
-        types_to_check = getMetDataLoader().softwareset.keys() if software_type is None else [software_type]
+        types_to_check = getMetDataLoader().software_set.keys() if software_type is None else [software_type]
         for type_to_check in types_to_check:
-            versions = getMetDataLoader().softwareset[type_to_check][name] if name in getMetDataLoader().softwareset[type_to_check] else None
+            versions = getMetDataLoader().software_set[type_to_check][name] if name in getMetDataLoader().software_set[type_to_check] else None
             if versions is None:
                 continue
-            if version is not None and version not in versions:
+            if version is not None and strip_version(version) not in versions:
                 versions = list(versions)
                 versions.append(version)
                 logging.getLogger('maskgen').warning( version + ' not in approved set for software ' + name)

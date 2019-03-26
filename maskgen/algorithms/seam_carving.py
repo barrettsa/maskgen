@@ -1,7 +1,12 @@
 import numpy as np
 from maskgen import cv2api, tool_set, image_wrap
 import cv2
-import numba
+try:
+    from numba import jit
+except:
+    def jit(original_function):
+        return original_function
+
 
 maxdisplacementvalue = np.iinfo(np.uint16).max
 
@@ -72,7 +77,7 @@ def _accumulate_energy_old(base_energy, energy_function=base_energy_function):
                     min_energy[i - 1, j + 1] + energy_function(base_energy,i,j,'R'))
     return min_energy
 
-@numba.jit()
+@jit()
 def _accumulate_energy(energy,energy_function=base_energy_function):
     """
     https://en.wikipedia.org/wiki/Seam_carving#Dynamic_programming
@@ -169,7 +174,7 @@ def _remove_seam(images, seam_idx):
     m, n = images[0].shape[: 2]
     outputs = []
     for image in images:
-        output =  np.zeros((m, n - 1)+ image.shape[2:])
+        output =  np.zeros((m, n - 1)+ image.shape[2:]).astype(image.dtype)
         for row in range(m):
             col = seam_idx[row]
             output[row,] = np.delete(image[row, :], col, 0)
@@ -182,7 +187,7 @@ def _add_seam(images_and_value, seam_idx):
     m, n = images_and_value[0][0].shape[: 2]
     outputs = []
     for image,value in images_and_value:
-        output = np.zeros((m, n + 1) + image.shape[2:])
+        output = np.zeros((m, n + 1) + image.shape[2:]).astype(image.dtype)
         for row in range(m):
             col = seam_idx[row]
             if len(image.shape) > 2:
@@ -248,27 +253,33 @@ class MaskTracker:
         self.neighbors_mask = _image_rotate(self.neighbors_mask,direction)
 
     def move_pixels(self, image):
+        type_var = image.dtype
+        image = image.astype(np.float32)
         if len(image.shape) == 3:
             output = np.zeros((self.dropped_adjuster[0].shape[0],
                                self.dropped_adjuster[0].shape[1],
-                               image.shape[2]), dtype=np.uint8)
+                               image.shape[2]), dtype=type_var)
             for channel in range(image.shape[2]):
                 self._move_pixels(output[:,:,channel],image[:,:,channel],self.dropped_adjuster)
         else:
-            output = np.zeros(self.dropped_adjuster[0].shape, dtype=np.uint8)
+            output = np.zeros(self.dropped_adjuster[0].shape, dtype=type_var)
             self._move_pixels(output,image,self.dropped_adjuster)
+        output.astype(type_var)
         return output
 
     def invert_move_pixels(self, image):
+        type_var = image.dtype
+        image = image.astype(np.float32)
         if len(image.shape) == 3:
             output = np.zeros((self.dropped_mask.shape[0],
                                self.dropped_mask.shape[1],
-                               image.shape[2]), dtype=np.uint8)
+                               image.shape[2]), dtype=type_var)
             for channel in range(image.shape[2]):
                 self._invert_move_pixels(output[:,:,channel],image[:,:,channel])
         else:
-            output = np.zeros(self.dropped_mask.shape, dtype=np.uint8)
-            self._invert_move_pixels(output,image)
+            output = np.zeros(self.dropped_mask.shape, dtype=type_var)
+            self._invert_move_pixels(output, image)
+        output.astype(type_var)
         return output
 
 
@@ -283,8 +294,8 @@ class MaskTracker:
             self.neighbors_mask[row, col + 1] += 1
 
     def drop_pixel(self, oldrow, oldcol, newrow, newcol):
-        if newrow < self.dropped_adjuster.shape[0] and \
-            newcol < self.dropped_adjuster.shape[1]:
+        if newrow < self.dropped_adjuster.shape[1] and \
+            newcol < self.dropped_adjuster.shape[2]:
             self.dropped_adjuster[0, newrow, newcol] = oldrow
             self.dropped_adjuster[1, newrow, newcol] = oldcol
             self.__set_neighbors(newrow, newcol)
@@ -355,10 +366,12 @@ class MaskTracker:
         image_wrap.ImageWrapper(self.dropped_mask * 255).save(filename)
 
     def _move_pixels(self, output, input, adjuster):
-        for row in range(output.shape[0]):
-            for col in range(output.shape[1]):
-                if adjuster[0, row, col] != maxdisplacementvalue and adjuster[1, row, col] != maxdisplacementvalue:
-                    output[row,col] = input[adjuster[0, row, col],adjuster[1, row, col]]
+        adjuster_cp = np.copy(adjuster)
+        da = np.indices((adjuster_cp.shape[1],adjuster_cp.shape[2]))
+        adjuster_cp[adjuster_cp==maxdisplacementvalue] = da[adjuster_cp==maxdisplacementvalue]
+        #remap wants float 32
+        adjuster_cp = adjuster_cp.astype(np.float32)
+        output[:] = cv2.remap(input, adjuster_cp[1], adjuster_cp[0], cv2.INTER_NEAREST)
 
     def _rebuildInverter(self):
         self.inverter = np.array([
@@ -479,7 +492,9 @@ class SeamCarver:
         self.keep_size = keep_size
 
         # read in image and store as np.float64 format
-        self.image = tool_set.openImageFile(filename).to_array().astype(np.float64)
+        img = tool_set.openImageFile(filename).to_array()
+        self.img_type = img.dtype
+        self.image = img.astype(np.float64)
         if shape is None:
             self.shape = (self.image.shape[0], self.image.shape[1])
         else:
@@ -659,7 +674,7 @@ class SeamCarver:
                                            multipliers=[protected],
                                            energy_function=self.energy_function)
 
-        return current_image.image, self.mask_tracker.dropped_mask*255
+        return current_image.image.astype(self.img_type), self.mask_tracker.dropped_mask*255
 
 
 
@@ -751,20 +766,23 @@ def __composeArguments(mask_tracker, arguments={}):
     import os
     source = arguments['source filename']
     adjusternames = os.path.join(os.path.dirname(source),
-                                 tool_set.shortenName(os.path.basename(source), '.png',id=tool_set.uniqueId()))
+                                 tool_set.shortenName(os.path.basename(source), '.png', identifier=tool_set.uniqueId()))
     finalmaskname = os.path.join(os.path.dirname(source),
-                                 tool_set.shortenName(os.path.basename(source), '_final_mask.png',id=tool_set.uniqueId()))
+                                 tool_set.shortenName(os.path.basename(source), '_final_mask.png',
+                                                      identifier=tool_set.uniqueId()))
     args = {}
     args.update(arguments)
-    if 'row adjuster' not in arguments:
+    if 'row adjuster' not in arguments or ('mask interpolated' in arguments and arguments['mask interpolated'] == 'yes'):
         adjusternames_row, adjusternames_col = mask_tracker.save_adjusters(adjusternames)
         args.update({
             'column adjuster': os.path.basename(adjusternames_col),
-            'row adjuster': os.path.basename(adjusternames_row)})
-    if 'neighbor mask' not in arguments:
+            'row adjuster': os.path.basename(adjusternames_row),
+            'mask interpolated': 'yes'})
+    if 'neighbor mask' not in arguments or ('mask interpolated' in arguments and arguments['mask interpolated'] == 'yes'):
         mask_tracker.save_neighbors_mask(finalmaskname)
         args.update({
-            'neighbor mask': os.path.basename(finalmaskname)
+            'neighbor mask': os.path.basename(finalmaskname),
+            'mask interpolated': 'yes'
         })
     return {'arguments': args}
 

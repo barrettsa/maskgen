@@ -20,7 +20,7 @@ Contains classes for managing camera browser adding/editing
 
 class HP_Device_Form(Toplevel):
     """This class creates the window to add a new device. Must have browser login."""
-    def __init__(self, master, validIDs=None, pathvar=None, token=None, browser=None):
+    def __init__(self, master, validIDs=None, pathvar=None, token=None, browser=None, gan=False):
         Toplevel.__init__(self, master)
         self.geometry("%dx%d%+d%+d" % (600, 600, 250, 125))
         self.master = master
@@ -28,7 +28,8 @@ class HP_Device_Form(Toplevel):
         self.validIDs = validIDs if validIDs is not None else []
         self.set_list_options()
         self.camera_added = False
-
+        self.is_gan = gan
+        self.renamed = {}
         self.trello_token = StringVar()
         self.trello_token.set(token) if token is not None else ''
         self.browser_token = StringVar()
@@ -58,12 +59,13 @@ class HP_Device_Form(Toplevel):
         Label(self.f.interior, text='Add a new HP Device', font=('bold underline', 25)).pack()
         Label(self.f.interior, text='Once complete, the new camera will be added automatically, and a notification card will be posted to trello.', wraplength=400).pack()
 
-        Label(self.f.interior, text='Sample File', font=('bold', 18)).pack()
-        Label(self.f.interior, text='This is required. Select an image/video/audio file. Once metadata is loaded from it, you may continue to complete the form.'
-                                    ' Some devices can have multiple make/model configurations for images vs. video, or for apps. In this instances, submit this '
-                                    'form as normal, and then go to File->Update a Device on the main GUI.', wraplength=400).pack()
-        self.imageButton = Button(self.f.interior, text='Select File', command=self.populate_from_image)
-        self.imageButton.pack()
+        if not self.is_gan:
+            Label(self.f.interior, text='Sample File', font=('bold', 18)).pack()
+            Label(self.f.interior, text='This is required. Select an image/video/audio file. Once metadata is loaded from it, you may continue to complete the form.'
+                                        ' Some devices can have multiple make/model configurations for images vs. video, or for apps. In this instances, submit this '
+                                        'form as normal, and then go to File->Update a Device on the main GUI.', wraplength=400).pack()
+            self.imageButton = Button(self.f.interior, text='Select File', command=self.populate_from_image)
+            self.imageButton.pack()
 
         # all questions defined here. end name with a * to make mandatory
         head = [('Media Type*', {'description': 'Select the type of media contained in the sample file (Image, Video, Audio)',
@@ -131,8 +133,7 @@ class HP_Device_Form(Toplevel):
 
         Label(self.f.interior, text='Browser Login Token*', font=(20)).pack()
         Label(self.f.interior, text='This allows for the creation of the new device.').pack()
-        browser_link = 'https://medifor.rankone.io/api/login/'
-        browserTokenButton = Button(self.f.interior, text='Get Browser Token', command=lambda: self.open_link(browser_link))
+        browserTokenButton = Button(self.f.interior, text='Get Browser Token', command=lambda: tkMessageBox.showinfo("Get Browser Token", "Refer to the HP Tool guide to retrieve your browser token."))
         browserTokenButton.pack()
         browserEntry = Entry(self.f.interior, textvar=self.browser_token)
         browserEntry.pack()
@@ -140,13 +141,59 @@ class HP_Device_Form(Toplevel):
         buttonFrame = Frame(self)
         buttonFrame.pack()
 
-        self.okbutton = Button(buttonFrame, text='Complete', command=self.export_results, state='disabled')
+        self.okbutton = Button(buttonFrame, text='Complete', command=self.export_results)
         self.okbutton.pack()
         self.cancelbutton = Button(buttonFrame, text='Cancel', command=self.destroy)
         self.cancelbutton.pack()
 
-        for q, a in self.questions.iteritems():
-            a.disable()
+        if self.is_gan:
+            self.questions['Exif Camera Make'].edit_items([])
+            self.questions['Device Type*'].edit_items(['Computational'])
+            self.questions['Device Type*'].set('Computational')
+            self.add_required('Edition')
+            self.questions['Sensor Information'].pack_forget()
+            self.questions['Device Serial Number'].pack_forget()
+            self.add_required('Exif Camera Model')
+            self.questions['HP Model*'].pack_forget()
+            self.questions["Lens Mount*"].pack_forget()
+            self.questions['Lens Mount*'].set("NA")
+            self.remove_required("Lens Mount*")
+            self.add_required('Firmware/OS')
+            self.add_required('Firmware/OS Version')
+            self.rename("Exif Camera Make", "GAN Name*", "Name of the GAN used")
+
+        else:
+            self.okbutton.configure(state='disabled')
+            for q, a in self.questions.iteritems():
+                a.disable()
+
+    def remove_required(self, data):
+        if not data.endswith("*"):
+            return
+        try:
+            self.headers[data[:-1]] = self.headers.pop(data)
+            self.questions[data].remove_required()
+            self.renamed[data[:-1]] = data
+        except KeyError:
+            return
+
+    def add_required(self, data):
+        if data.endswith("*"):
+            return
+        try:
+            self.headers[data + "*"] = self.headers.pop(data)
+            self.questions[data].add_required()
+            self.renamed[data + "*"] = data
+        except KeyError:
+            return
+
+    def rename(self, item, title, desc):
+        try:
+            self.headers[title] = self.headers.pop(item)
+            self.renamed[title] = item
+            self.questions[item].rename(title, desc)
+        except KeyError:
+            return
 
     def populate_from_image(self):
         """
@@ -183,9 +230,16 @@ class HP_Device_Form(Toplevel):
         Triggers when ok/complete button is clicked. Validates and exports the new camera data
         :return: None
         """
+        if self.is_gan:
+            self.questions["HP Model*"].set(self.questions['Exif Camera Model'].get())
+
         msg = None
         for h in self.headers:
-            if h.endswith('*') and self.questions[h].get() == '':
+            if h in self.renamed.keys():
+                contents = self.questions[self.renamed[h]].get()
+            else:
+                contents = self.questions[h].get()
+            if h.endswith('*') and contents == '':
                 msg = 'Field ' + h[:-1] + ' is a required field.'
                 break
         if self.browser_token.get() == '':
@@ -220,7 +274,7 @@ class HP_Device_Form(Toplevel):
         Handles the browser interaction
         :return: requests.post() response
         """
-        url = 'https://medifor.rankone.io/api/cameras/'
+        url = self.master.settings.get_key("apiurl") + '/cameras/'
         headers = {
             'Content-Type': 'application/json',
             'Authorization': 'Token ' + self.browser_token.get(),
@@ -266,11 +320,9 @@ class HP_Device_Form(Toplevel):
         :return: (string) Error message (if error), otherwise None
         """
         print 'Verifying local ID is not already in use...'
-        c = API_Camera_Handler(self, token=self.browser_token.get(), url='https://medifor.rankone.io', given_id=self.questions["Local ID*"].get())
+        c = API_Camera_Handler(self, token=self.browser_token.get(), url=self.master.settings.get_key("apiurl"), given_id=self.questions["Local ID*"].get())
         local_id_reference = c.get_local_ids()
-        if not local_id_reference:
-            return 'Could not successfully connect to Medifor browser. Please check credentials.'
-        elif self.questions['Local ID*'].get().lower() in [i.lower() for i in local_id_reference]:
+        if self.questions['Local ID*'].get().lower() in [i.lower() for i in local_id_reference]:
             return 'Local ID ' + self.questions['Local ID*'].get() + ' already in use.'
 
     def open_link(self, link):
@@ -323,9 +375,11 @@ class SectionFrame(Frame):
         self.create_form_item()
 
     def create_form_item(self):
-        self._title = Label(self, text=self.title, font=(20)).grid(row=self.row)
+        self._title = Label(self, text=self.title, font=(20))
+        self._title.grid(row=self.row)
         self.row+=1
-        self._descr = Label(self, text=self.descr, wraplength=350).grid(row=self.row)
+        self._descr = Label(self, text=self.descr, wraplength=350)
+        self._descr.grid(row=self.row)
         self.row+=1
         if 'list' in self.type:
             self._form = ttk.Combobox(self, textvariable=self.val, values=self.items)
@@ -363,6 +417,19 @@ class SectionFrame(Frame):
     def enable(self):
         if hasattr(self, '_form'):
             self._form.config(state='normal')
+
+    def edit_items(self, new_vals):
+        self._form['values'] = new_vals
+
+    def remove_required(self):
+        self._title['text'] = self._title['text'][:-1] if self._title['text'].endswith("*") else self._title['text']
+
+    def add_required(self):
+        self._title['text'] = self._title['text'] + "*" if not self._title['text'].endswith("*") else self._title['text']
+
+    def rename(self, title, desc):
+        self._title['text'] = title if title else self._title['text']
+        self._descr['text'] = desc if desc else self._descr['text']
 
 class Update_Form(Toplevel):
     """
@@ -453,7 +520,7 @@ class Update_Form(Toplevel):
         Posts the camera update, and notifies trello if option is selected.
         :return: None. Should pop up box with status when complete.
         """
-        url = 'https://medifor.rankone.io/api/cameras/' + str(self.device_data['id']) + '/'
+        url = self.master.settings.get_key('apiurl') + '/cameras/' + str(self.device_data['id']) + '/'
         headers = {
             'Content-Type': 'application/json',
             'Authorization': 'Token ' + self.browser,
@@ -466,6 +533,16 @@ class Update_Form(Toplevel):
         if r.status_code in (requests.codes.ok, requests.codes.created):
             if tkMessageBox.askyesno(title='Done!', message='Camera updated. Post notification to Trello?', parent=self):
                 self.camupdate_notify_trello(url)
+
+            with open(data_files._LOCALDEVICES, 'r+') as j:
+                local = json.load(j)
+                for item in local:
+                    if item == self.device_data['hp_device_local_id']:
+                        local[item] = data
+                        break
+                new = json.dumps(local, indent=4)
+                j.write(new)
+
             self.updated = True
             self.destroy()
         else:
@@ -508,7 +585,7 @@ class Update_Form(Toplevel):
         # list ID for "New Devices" list
         trello_key = data_files._TRELLO['app_key']
         list_id = data_files._TRELLO['camera_update_list']
-        link = 'https://medifor.rankone.io/camera/' + str(self.device_data['id'])
+        link = self.master.settings.get_key("apiurl")[:-4] + '/camera/' + str(self.device_data['id'])
 
         # post the new card
         title = 'Camera updated: ' + self.device_data['hp_device_local_id']
@@ -592,7 +669,7 @@ class VerticalScrolledFrame(Frame):
                         yscrollcommand=vscrollbar.set)
         self.canvas.pack(side=LEFT, fill=BOTH, expand=TRUE)
         vscrollbar.config(command=self.canvas.yview)
-        self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
+        self.canvas.bind("<MouseWheel>", self.on_mousewheel)
 
         # reset the view
         self.canvas.xview_moveto(0)

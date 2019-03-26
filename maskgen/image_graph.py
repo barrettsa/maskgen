@@ -1,16 +1,28 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
+
 import os
 import networkx as nx
 from networkx.readwrite import json_graph
-from image_wrap import deleteImage
+from maskgen.image_wrap import deleteImage
 import json
 import shutil
-from software_loader import getOS
 import tarfile
-from tool_set import *
+import numpy as np
 from time import gmtime, strftime, strptime
 import logging
 from maskgen import __version__
 from threading import RLock
+from support import getPathValues, setPathValue, Proxy, ModuleStatus, getValue
+from image_wrap import getProxy
+from tool_set import getMilliSecondsAndFrameCount,fileType,openImage,getOS
+from maskgen.userinfo import get_username
+from datetime import datetime
 
 igversion = __version__
 
@@ -90,76 +102,6 @@ def extract_and_list_archive(fname, dir):
 
     return l
 
-
-def setPathValue(d, path, value):
-    pos = path.find('.')
-    lbracket = path.find('[')
-    listpos = None
-    nextpath = path[pos + 1:] if pos > 0 else None
-    if lbracket > 0 and (pos < 0 or lbracket < pos):
-        rbracket = path.find(']')
-        listpos = int(path[lbracket + 1:rbracket])
-        pos = lbracket
-    if pos < 0:
-        if listpos is not None:
-            d[path][listpos] = value
-        elif value is None:
-            d.pop(path)
-        else:
-            d[path] = value
-    elif listpos is not None:
-        setPathValue(d[path[0:pos]][listpos], nextpath, value)
-    else:
-        if path[0:pos] not in d:
-            d[path[0:pos]] = {}
-        setPathValue(d[path[0:pos]], nextpath, value)
-
-
-def getPathValues(d, path):
-    """
-    Given a nest structure,
-    return all the values reference by the given path.
-    Always returns a list.
-    If the value is not found, the list is empty
-
-    NOTE: Processing a list is its own recursion.
-    """
-    pos = path.find('.')
-    currentpath = path[0:pos] if pos > 0 else path
-    nextpath = path[pos + 1:] if pos > 0 else None
-    lbracket = path.find('[')
-    itemnum = None
-    if lbracket >= 0 and (pos < 0 or lbracket < pos):
-        rbracket = path.find(']')
-        itemnum = int(path[lbracket + 1:rbracket])
-        currentpath = path[0:lbracket]
-        # keep the bracket for the next recurive depth
-        nextpath = path[lbracket:] if lbracket > 0 else nextpath
-    if type(d) is list:
-        result = []
-        if itemnum is not None:
-            result.extend(getPathValues(d[itemnum], nextpath))
-        else:
-            for item in d:
-                # still on the current path node
-                result.extend(getPathValues(item, path))
-        return result
-    if pos < 0:
-        if currentpath == '*':
-            result = []
-            for k, v in d.iteritems():
-                result.append(v)
-            return result
-        return [d[currentpath]] if currentpath in d and d[currentpath] else []
-    else:
-        if currentpath == '*':
-            result = []
-            for k, v in d.iteritems():
-                result.extend(getPathValues(v, nextpath))
-            return result
-        return getPathValues(d[currentpath], nextpath) if currentpath in d else []
-
-
 def getPathPartAndValue(path, data):
     if path in data:
         return path, data[path]
@@ -169,8 +111,8 @@ def getPathPartAndValue(path, data):
     return getPathPartAndValue(path[0:pos], data)
 
 
-def get_pre_name(file):
-    pos = file.rfind('.')
+def get_pre_name(file, left=False):
+    pos = file.find('.') if left else file.rfind('.')
     return file[0:pos] if (pos > 0) else file
 
 
@@ -228,16 +170,30 @@ def find_project_json(prefix, directory):
     return None
 
 
-def createGraph(pathname, projecttype=None, nodeFilePaths={}, edgeFilePaths={}, arg_checker_callback=None):
+def findCreatorTool(tool):
+    import sys
+    return tool if tool is not None else os.path.split(sys.argv[0])[1]
+
+def createGraph(pathname, projecttype=None, nodeFilePaths={}, edgeFilePaths={}, graphFilePaths={}, arg_checker_callback=None,
+                username=None,tool=None):
     """
-      Factory for an Project Graph, existing or new.
+        Factory for an Project Graph, existing or new.
       Supports a tgz of a project or the .json of a project
+    :param pathname: JSON file name or TGZ file
+    :param projecttype: video,image,audio
+    :param nodeFilePaths: paths in nodes that reference files to be included in project
+    :param edgeFilePaths: paths in nodes that reference files to be included in project
+    :param graphFilePaths: paths in graph that reference files to be included in project
+    :param arg_checker_callback:
+    :param username: str name
+    :param tool: str name
+    :return:
     """
     G = None
     if (os.path.exists(pathname) and pathname.endswith('.json')):
         G = loadJSONGraph(pathname)
         projecttype = G.graph['projecttype'] if 'projecttype' in G.graph else projecttype
-    if (os.path.exists(pathname) and pathname.endswith('.tgz')):
+    elif (os.path.exists(pathname) and pathname.endswith('.tgz')):
         dir = os.path.split(os.path.abspath(pathname))[0]
         elements = extract_and_list_archive(pathname, dir)
         if elements is not None and len(elements) > 0:
@@ -256,12 +212,25 @@ def createGraph(pathname, projecttype=None, nodeFilePaths={}, edgeFilePaths={}, 
                       projecttype=projecttype,
                       arg_checker_callback=arg_checker_callback,
                       nodeFilePaths=nodeFilePaths,
-                      edgeFilePaths=edgeFilePaths)
+                      edgeFilePaths=edgeFilePaths,
+                      graphFilePaths=graphFilePaths,
+                      username=username if username is not None else
+                      (G.graph['username'] if G is not None and 'username' in G.graph else get_username()),
+                      tool=findCreatorTool(tool))
+
+
+class GraphProxy(Proxy):
+    results = dict()
+    "Caching Proxy"
+
+    def get_image(self, name, metadata=dict()):
+        if name not in self.results:
+            self.results[name] = self._target.get_image(name, metadata=metadata)
+        return self.results[name]
 
 
 class ImageGraph:
     dir = os.path.abspath('.')
-
 
     def getUIGraph(self):
         return self.G
@@ -270,17 +239,23 @@ class ImageGraph:
         return self.G.name
 
     def __init__(self, pathname, graph=None, projecttype=None, nodeFilePaths={}, edgeFilePaths={},
-                 arg_checker_callback=None):
+                 graphFilePaths={},
+                 arg_checker_callback=None,username=None,tool=None):
         fname = os.path.split(pathname)[1]
         self.filesToRemove = set()
         self.U = list()
         self.lock = RLock()
-        name = get_pre_name(fname)
+        name = get_pre_name(fname, left=True)
         self.dir = os.path.abspath('.')
         self.idc = 0
         self.arg_checker_callback = arg_checker_callback
         self.G = graph if graph is not None else nx.DiGraph(name=name)
-        self._setup(pathname, projecttype, nodeFilePaths, edgeFilePaths)
+        self.username = username if username is not None else get_username()
+        self.tool = tool if tool is not None else 'jtapi'
+        self._setup(pathname, projecttype, nodeFilePaths, edgeFilePaths,graphFilePaths)
+
+    def isEdgeFilePath(self,path):
+        return path in self.G.graph['edgeFilePaths']
 
     def addEdgeFilePath(self, path, ownership):
         """
@@ -315,7 +290,8 @@ class ImageGraph:
                              metadata['Frame Time']),
                          isMask=mask,
                          preserveSnapshot=(imgDir == os.path.abspath(self.dir) and \
-                                           ('skipSnapshot' not in metadata or not metadata['skipSnapshot'])))
+                                           ('skipSnapshot' not in metadata or not metadata['skipSnapshot'])),
+                         args=metadata)
 
     def replace_attribute_value(self, attributename, oldvalue, newvalue):
         self._setUpdate(attributename, update_type='attribute')
@@ -342,12 +318,14 @@ class ImageGraph:
     def get_project_type(self):
         return self.G.graph['projecttype'] if 'projecttype' in self.G.graph else None
 
-
     def set_project_type(self,projecttype):
         self.G.graph['projecttype'] = projecttype
 
     def get_pathname(self, name):
         return os.path.join(self.dir, self.G.node[name]['file'])
+
+    def get_filename(self, name):
+        return self.G.node[name]['file']
 
     def get_edges(self):
         return self.G.edges()
@@ -366,6 +344,16 @@ class ImageGraph:
         fname = nname + suffix
         return fname
 
+    def __recordTool(self):
+        if self.tool is not None:
+            if 'modifier_tools' not in self.G.graph:
+                modifier_tools = []
+            else:
+                modifier_tools = self.G.graph['modifier_tools']
+            if self.tool not in modifier_tools:
+                modifier_tools.append(self.tool)
+            self.G.graph['modifier_tools'] = modifier_tools
+
     def __filter_args(self, args, exclude=[]):
         result = {}
         for k, v in args.iteritems():
@@ -379,7 +367,6 @@ class ImageGraph:
         self.arg_checker_callback(op, args)
 
     def add_node(self, pathname, nodeid=None, seriesname=None, **kwargs):
-        proxypathname = getProxy(pathname)
         fname = os.path.split(pathname)[1]
         origdir = os.path.split(os.path.abspath(pathname))[0]
         filetype = fileType(pathname)
@@ -400,35 +387,28 @@ class ImageGraph:
             includePathInUndo = True
             if (os.path.exists(pathname)):
                 shutil.copy2(pathname, newpathname)
+            else:
+                logging.getLogger('maskgen').error('Cannot find file {}'.format(pathname))
+                raise ValueError(pathname)
         self._setUpdate(nname, update_type='node')
+        self.__recordTool()
+        updated_args = self._updateNodePathValue(kwargs)
         with self.lock:
             self.G.add_node(nname,
                             seriesname=(origname if seriesname is None else seriesname),
                             file=fname,
                             ownership=('yes' if includePathInUndo else 'no'),
-                            username=get_username(),
+                            username=self.username,
                             filetype=filetype,
                             ctime=datetime.strftime(datetime.now(), '%Y-%m-%d %H:%M:%S'),
-                            **self.__filter_args(kwargs, exclude=['filetype', 'seriesname', 'username', 'ctime', 'ownership', 'file']))
+                            **self.__filter_args(updated_args, exclude=['filetype', 'seriesname', 'username', 'ctime', 'ownership', 'file']))
 
-            self.__scan_args('node', kwargs)
-
-            if proxypathname is not None:
-                self.G.node[nname]['proxyfile'] = proxypathname
-
+            self.__scan_args('node', updated_args)
             self.U = []
             self.U.append(dict(name=nname, action='addNode', **self.G.node[nname]))
             # adding back a file that was targeted for removal
             if newpathname in self.filesToRemove:
                 self.filesToRemove.remove(newpathname)
-            for path, ownership in self.G.graph['nodeFilePaths'].iteritems():
-                vals = getPathValues(kwargs, path)
-                if len(vals) > 0:
-                    pathvalue, ownershipvalue = self._handle_inputfile(vals[0])
-                    if vals[0]:
-                        kwargs[path] = pathvalue
-                        if len(ownership) > 0:
-                            kwargs[ownership] = ownershipvalue
         return nname
 
     def undo(self):
@@ -463,6 +443,29 @@ class ImageGraph:
                 self.remove_edge(d['start'], d['end'])
         self.U = []
 
+    def get_edge_image_file_time(self, start, end, path):
+        """
+        Get image name and file name for image given edge identified by start and end and the edge property path
+        :param start:
+        :param end:
+        :param path:
+        :return:
+        @type start: str
+        @type end: str
+        @type path: str
+        @rtype (ImageWrapper, str)
+        """
+        edge = self.get_edge(start, end)
+        if edge is not None:
+            values = getPathValues(edge, path)
+            if len(values) > 0:
+                value = values[0]
+                fullpath = os.path.abspath(os.path.join(self.dir, value))
+                if not os.path.exists(fullpath):
+                    return 0
+                return os.stat(fullpath).st_mtime
+        return 0
+
     def get_edge_image(self, start, end, path, returnNoneOnMissing=False):
         """
         Get image name and file name for image given edge identified by start and end and the edge property path
@@ -476,14 +479,15 @@ class ImageGraph:
         @rtype (ImageWrapper, str)
         """
         edge = self.get_edge(start, end)
-        values = getPathValues(edge, path)
-        if len(values) > 0:
-            value = values[0]
-            fullpath = os.path.abspath(os.path.join(self.dir, value))
-            if returnNoneOnMissing and not os.path.exists(fullpath):
-                return None, None
-            im = self.openImage(fullpath, mask=True)
-            return im
+        if edge is not None:
+            values = getPathValues(edge, path)
+            if len(values) > 0:
+                value = values[0]
+                fullpath = os.path.abspath(os.path.join(self.dir, value))
+                if returnNoneOnMissing and not os.path.exists(fullpath):
+                    return None
+                im = self.openImage(fullpath, mask=True)
+                return im
         return None
 
     def getNodeFileType(self, nodeid):
@@ -503,7 +507,8 @@ class ImageGraph:
         self._setUpdate(node, update_type='node')
         if self.G.has_node(node):
             self.__scan_args('node', kwargs)
-            for k, v in kwargs.iteritems():
+            updated_args = self._updateNodePathValue(kwargs)
+            for k, v in updated_args.iteritems():
                 self.G.node[node][k] = v
 
     def update_edge(self, start, end, **kwargs):
@@ -612,7 +617,8 @@ class ImageGraph:
                             maskname=maskname,
                             op=op,
                             ctime=datetime.strftime(datetime.now(), '%Y-%m-%d %H:%M:%S'),
-                            description=description, username=get_username(), opsys=getOS(),
+                            description=description, username=self.username, opsys=getOS(),
+                            tool=self.tool,
                             **kwargs)
             self.U = []
             self.U.append(dict(action='addEdge', start=start, end=end, **self.G.edge[start][end]))
@@ -646,14 +652,18 @@ class ImageGraph:
         if not self.G.has_node(name):
             return None, None
         node = self.G.node[name]
+        meta = {}
+        meta.update(node)
+        meta.update(metadata)
         filename = os.path.abspath(os.path.join(self.dir, node['file']))
-        proxy = getProxy(filename)
-        if proxy and 'proxyfile' not in node:
-            # do not assume the proxy will be open but make sure
-            # it is preserved, since it may have been added after
-            # the node was added to the project
-            node['proxyfile'] = os.path.split(proxy)[1]
-        im = self.openImage(filename, metadata=metadata)
+        if 'proxyfile' in node and os.path.exists(os.path.abspath(os.path.join(self.dir, node['proxyfile']))):
+            im = self.openImage(os.path.abspath(os.path.join(self.dir, node['proxyfile'])), metadata=meta)
+            if im is not None:
+                return im,filename
+        meta = {}
+        meta.update(node)
+        meta.update(metadata)
+        im = self.openImage(filename, metadata=meta)
         return im, filename
 
     def get_image_path(self, name):
@@ -723,6 +733,11 @@ class ImageGraph:
             self.E = []
 
     def findRelationsToNode(self, node):
+        """
+        Find all nodes reachable from node via a link (non-directional)
+        :param node:
+        :return:
+        """
         nodeSet = set()
         nodeSet.add(node)
         q = set(self.G.successors(node))
@@ -758,13 +773,14 @@ class ImageGraph:
         return self.G.has_node(name)
 
     def getDataItem(self, item, default_value=None):
-        return self.G.graph[item] if item in self.G.graph else default_value
+        return self.G.graph[item] if item in self.G.graph else \
+            (self.G.graph[item.lower()] if item in self.G.graph else default_value)
 
     def setDataItem(self, item, value, excludeUpdate=False):
+        value = self._updatGraphPathValue(item, value)
         localExclude = item in self.G.graph and value == self.G.graph[item]
         if not (excludeUpdate or localExclude):
             self._setUpdate(item, update_type='graph')
-        self.G.graph[item] = value
 
     def getMetadata(self):
         return self.G.graph
@@ -781,13 +797,21 @@ class ImageGraph:
     def subgraph(self, nodes):
         return ImageGraph(os.path.join(self.dir,self.get_name() + '_sub'),
                    graph=nx.DiGraph(self.G.subgraph(nodes)),
-                   projecttype=self.get_project_type())
+                   projecttype=self.get_project_type(),
+                   username=self.username,
+                   tool=self.getCreatorTool())
 
     def getVersion(self):
         return igversion
 
+    def isFrozen(self):
+        return getValue(self.G.graph,'frozen',False)
+
+    def getCreatorTool(self):
+        return findCreatorTool(self.G.graph['creator_tool'] if 'creator_tool' in self.G.graph else None)
+
     def getCreator(self):
-        return self.G.graph['creator'] if 'creator' in self.G.graph else get_username()
+        return self.G.graph['creator'] if 'creator' in self.G.graph else self.username
 
     def findAncestor(self,match, start):
         for pred in self.predecessors(start):
@@ -800,7 +824,7 @@ class ImageGraph:
                     return ret
         return None
 
-    def _setup(self, pathname, projecttype, nodeFilePaths, edgeFilePaths):
+    def _setup(self, pathname, projecttype, nodeFilePaths, edgeFilePaths, graphFilePaths):
         global igversion
         import logging
         logging.getLogger('maskgen').info("Opening Journal {} with JT version {}".format(
@@ -817,12 +841,16 @@ class ImageGraph:
             self.G.graph['idcount'] = self.idc
             self.G.remove_node('idcount')
         self.dir = os.path.abspath(os.path.split(pathname)[0])
+        if 'creator_tool' not in self.G.graph and self.tool is not None:
+            self.G.graph['creator_tool'] = self.tool
         if 'username' not in self.G.graph:
-            self.G.graph['username'] = get_username()
+            self.G.graph['username'] = self.username
         if 'creator' not in self.G.graph:
-            self.G.graph['creator'] = get_username()
+            self.G.graph['creator'] = self.username
         if 'projecttype' not in self.G.graph and projecttype is not None:
             self.G.graph['projecttype'] = projecttype
+        if 'createtime' not in self.G.graph:
+            self.G.graph['createtime'] = datetime.strftime(datetime.now(), '%Y-%m-%d %H:%M:%S')
         if 'updatetime' not in self.G.graph:
             if 'exporttime' in self.G.graph:
                 self.G.graph['updatetime'] = self.G.graph['exporttime']
@@ -836,20 +864,28 @@ class ImageGraph:
         # so that the paths are both archived and removed if deleted
         if 'nodeFilePaths' not in self.G.graph:
             self.G.graph['nodeFilePaths'] = {'proxyfile': ''}
+        if 'graphFilePaths' not in self.G.graph:
+            self.G.graph['graphFilePaths'] = {'projectfile': ''}
         for k, v in edgeFilePaths.iteritems():
             self.G.graph['edgeFilePaths'][k] = v
         for k, v in nodeFilePaths.iteritems():
             self.G.graph['nodeFilePaths'][k] = v
+        for k, v in graphFilePaths.iteritems():
+                self.G.graph['graphFilePaths'][k] = v
 
     def getCycleNode(self):
         l = list(nx.simple_cycles(self.G))
         if len(l) > 0:
             return l[0]
 
+    def json_default(self, o):
+        if isinstance(o, np.int64): return int(o)
+        raise TypeError
+
     def saveas(self, pathname):
         currentdir = self.dir
         fname = os.path.split(pathname)[1]
-        name = get_pre_name(fname)
+        name = get_pre_name(fname, left=True)
         if os.path.isdir(pathname):
             self.dir = pathname
         else:
@@ -859,7 +895,7 @@ class ImageGraph:
         filename = os.path.abspath(os.path.join(self.dir, self.G.name + '.json'))
         self._copy_contents(currentdir)
         with open(filename, 'w') as f:
-            jg = json.dump(json_graph.node_link_data(self.G), f, indent=2, encoding='utf-8')
+            jg = json.dump(json_graph.node_link_data(self.G), f, indent=2, encoding='utf-8', default=self.json_default)
         self.filesToRemove.clear()
 
     def save(self):
@@ -867,11 +903,12 @@ class ImageGraph:
         backup = filename + '.bak'
         if os.path.exists(filename):
             shutil.copy(filename, backup)
+        usedfiles =set([self.G.node[node_id]['file'] for node_id in self.G.nodes()])
         with self.lock:
             with open(filename, 'w') as f:
-                jg = json.dump(json_graph.node_link_data(self.G), f, indent=2, encoding='utf-8')
+                jg = json.dump(json_graph.node_link_data(self.G), f, indent=2, encoding='utf-8', default=self.json_default)
             for f in self.filesToRemove:
-                if os.path.exists(f):
+                if os.path.exists(f) and os.path.basename(f) not in usedfiles:
                     os.remove(f)
             self.filesToRemove.clear()
 
@@ -887,6 +924,14 @@ class ImageGraph:
             newpathname = os.path.join(newdir, name)
             if (os.path.exists(oldpathname)):
                 shutil.copy2(oldpathname, newpathname)
+
+        for path, ownership in self.G.graph['graphFilePaths'].iteritems():
+            for pathvalue in getPathValues(self.G.graph, path):
+                if not pathvalue or len(pathvalue) == 0:
+                    continue
+                if len(ownership) > 0:
+                    self.G[ownership] = 'yes'
+                moveFile(self.dir, currentdir, pathvalue)
 
         for nname in self.G.nodes():
             node = self.G.node[nname]
@@ -910,7 +955,20 @@ class ImageGraph:
                     moveFile(self.dir, currentdir, pathvalue)
 
     def file_check(self):
+        """
+        Check for the existence of files referenced in the graph
+        :return: list of (start node, end node and message)
+        @rtype list of (str,str,str)
+        """
         missing = []
+        for path, ownership in self.G.graph['graphFilePaths'].iteritems():
+            for pathvalue in getPathValues(self.G.graph, path):
+                if not pathvalue or len(pathvalue) == 0:
+                    continue
+                if not os.path.exists(os.path.join(self.dir, pathvalue)):
+                        missing.append(
+                            ('Missing ' + path + ' file in project'))
+
         for nname in self.G.nodes():
             node = self.G.node[nname]
             if not os.path.exists(os.path.join(self.dir, node['file'])):
@@ -933,14 +991,23 @@ class ImageGraph:
                             edgename[1]) + ' is missing ' + path + ' file in project'))
         return missing
 
-    def create_archive(self, location, include=[]):
+    def create_archive(self, location, include=[], redacted=[], notifier=None):
+        """
+
+        :param location:
+        :param include:
+        :param redacted: a list of registered file paths to exclude @see addEdgeFilePath
+        :return:
+        """
         self.G.graph['exporttime'] = strftime("%Y-%m-%d %H:%M:%S", gmtime())
-        fname, errors, names_added = self._create_archive(location, include=include)
+        fname, errors, names_added = self._create_archive(location, include=include,
+                                                          redacted=redacted,
+                                                          notifier=notifier)
         names_added = [os.path.split(i)[1] for i in names_added]
         tries = 0
         if len(errors) == 0:
             while not self._check_archive_integrity(fname, names_added) and tries < 3:
-                fname, errors, names_added = self._create_archive(location)
+                fname, errors, names_added = self._create_archive(location, redacted=redacted,notifier=notifier)
                 tries += 1
         return fname, ([('', '', "Failed to create archive")] if (tries == 3 and len(errors) == 0) else errors)
 
@@ -961,22 +1028,47 @@ class ImageGraph:
             return False
         return True
 
+    def _archive_graph(self, archive, names_added=list()):
+        errors = list()
+        for path, ownership in self.G.graph['graphFilePaths'].iteritems():
+            for pathvalue in getPathValues(self.G.graph, path):
+                if not pathvalue or len(pathvalue) == 0:
+                    continue
+                pathvalue = pathvalue.strip()
+                newpathname = os.path.join(self.dir, pathvalue)
+                if os.path.exists(newpathname):
+                    name_to_add = os.path.join(self.G.name, pathvalue)
+                    if name_to_add not in names_added:
+                        archive.add(newpathname, arcname=name_to_add)
+                        names_added.append(name_to_add)
+                else:
+                    errors.append(
+                        (str(self.G.name), str(self.G.name), 'Project missing ' + pathvalue))
+        return errors
+
     def _archive_node(self, nname, archive, names_added=list()):
         node = self.G.node[nname]
         errors = list()
-        if os.path.exists(os.path.join(self.dir, node['file'])):
-            archive.add(os.path.join(self.dir, node['file']), arcname=os.path.join(self.G.name, node['file']))
-            names_added.append(os.path.join(self.G.name, node['file']))
+        filename = os.path.join(self.dir, node['file'])
+        if os.path.exists(filename):
+            name_to_add = os.path.join(self.G.name, node['file'])
+            if name_to_add not in names_added:
+                archive.add(filename, arcname=name_to_add)
+                names_added.append(name_to_add)
         else:
             errors.append((str(nname), str(nname), str(nname) + " missing file"))
+
         for path, ownership in self.G.graph['nodeFilePaths'].iteritems():
             for pathvalue in getPathValues(node, path):
                 if not pathvalue or len(pathvalue) == 0:
                     continue
+                pathvalue= pathvalue.strip()
                 newpathname = os.path.join(self.dir, pathvalue)
                 if os.path.exists(newpathname):
-                    archive.add(newpathname, arcname=os.path.join(self.G.name, pathvalue))
-                    names_added.append(os.path.join(self.G.name, pathvalue))
+                    name_to_add = os.path.join(self.G.name, pathvalue)
+                    if name_to_add not in names_added:
+                        archive.add(newpathname, arcname=name_to_add)
+                        names_added.append(name_to_add)
                 else:
                     errors.append(
                         (str(nname), str(nname), str(nname) + ' missing ' + pathvalue))
@@ -998,30 +1090,46 @@ class ImageGraph:
         except Exception as e:
             logging.getLogger('maskgen').error("Unable to create image graph: " + str(e))
 
-    def _create_archive(self, location, include=[]):
+    def _create_archive(self, location, include=[], redacted=[], notifier=None):
         self.save()
+        total = float(len(self.G.nodes()) + len(self.G.edges()) + len(include)) + 1
         fname = os.path.join(location, self.G.name + '.tgz')
         archive = tarfile.open(fname, "w:gz", errorlevel=2)
         archive.add(os.path.join(self.dir, self.G.name + ".json"),
                     arcname=os.path.join(self.G.name, self.G.name + ".json"))
         errors = list()
         names_added = list()
+        count = 0
+        self._archive_graph(archive, names_added=names_added)
         for nname in self.G.nodes():
             self._archive_node(nname, archive, names_added=names_added)
+            count += 1
+            if notifier is not None:
+                notifier(ModuleStatus('Export', 'Archive', nname, 100.0 * count/total))
         for edgename in self.G.edges():
             edge = self.G[edgename[0]][edgename[1]]
             errors.extend(
-                self._archive_edge(edgename[0], edgename[1], edge, self.G.name, archive, names_added=names_added))
+                self._archive_edge(edgename[0], edgename[1], edge, self.G.name, archive, names_added=names_added, redacted=redacted))
+            count += 1
+            if notifier is not None:
+                notifier(ModuleStatus('Export', 'Archive', str(edgename), 100.0 * count / total))
         for item in include:
             archive.add(os.path.join(self.dir, item),
                         arcname=item)
+            count += 1
+            if notifier is not None:
+                notifier(ModuleStatus('Export', 'Archive', item, 100.0 * count / total))
         self._output_summary(archive)
         archive.close()
+        if notifier is not None:
+            notifier(ModuleStatus('Export', 'Archive', 'summary', 100.0))
         return fname, errors, names_added
 
-    def _archive_edge(self, start, end, edge, archive_name, archive, names_added=list()):
+    def _archive_edge(self, start, end, edge, archive_name, archive, names_added=list(), redacted=list()):
         errors = []
         for path, ownership in self.G.graph['edgeFilePaths'].iteritems():
+            if path in redacted:
+                continue
             for pathvalue in getPathValues(edge, path):
                 if not pathvalue or len(pathvalue) == 0:
                     continue
@@ -1034,15 +1142,15 @@ class ImageGraph:
                         (str(start), str(end), str(start) + ' => ' + str(end) + ': ' + ' missing ' + pathvalue))
         return errors
 
-    def _archive_path(self, child, archive_name, archive, pathGraph, names_added=list()):
+    def _archive_path(self, child, archive_name, archive, pathGraph, names_added=list(), redacted=[]):
         node = self.G.node[child]
         pathGraph.add_node(child, **node)
         self._archive_node(child, archive, names_added=names_added)
         errors = []
         for parent in self.G.predecessors(child):
-            errors.extend(self._archive_edge(self.G[parent][child], archive_name, archive, names_added=names_added))
+            errors.extend(self._archive_edge(self.G[parent][child], archive_name, archive, names_added=names_added, redacted=redacted))
             pathGraph.add_edge(parent, child, **self.G[parent][child])
-            errors.extend(self._archive_path(parent, archive_name, archive, pathGraph, names_added=names_added))
+            errors.extend(self._archive_path(parent, archive_name, archive, pathGraph, names_added=names_added,redacted=redacted))
         return errors
 
     def getLastUpdateTime(self):
@@ -1081,6 +1189,25 @@ class ImageGraph:
                         if len(ownershippath) > 0:
                             setPathValue(edge, ownershippath, ownershipvalue)
 
+    def _updatGraphPathValue(self, key, path):
+        if key in self.G.graph['graphFilePaths']:
+            pathvalue, ownershipvalue = self._handle_inputfile(path)
+            setPathValue(self.G.graph,key,pathvalue)
+            return pathvalue
+        else:
+            setPathValue(self.G.graph, key, path)
+            return path
+
+    def _updateNodePathValue(self, args):
+        import copy
+        result = copy.copy(args)
+        for path in self.G.graph['nodeFilePaths']:
+            vals = getPathValues(args, path)
+            if len(vals) > 0:
+                pathvalue, ownershipvalue = self._handle_inputfile(vals[0])
+                result[path] = pathvalue
+        return result
+
     def _updateEdgePathValue(self, edge, path, value):
         setPathValue(edge, path, value)
         for edgePath in self.G.graph['edgeFilePaths']:
@@ -1094,7 +1221,12 @@ class ImageGraph:
                         if len(ownershippath) > 0:
                             setPathValue(edge, ownershippath, ownershipvalue)
 
-    def create_path_archive(self, location, end):
+    def create_path_archive(self, location, end, redacted=[]):
+        """
+        :param location:
+        :param redacted: a list of registered file paths to exclude @see addEdgeFilePath
+        :return:
+        """
         self.save()
         names_added = list()
         if end in self.G.nodes():
@@ -1102,7 +1234,7 @@ class ImageGraph:
             archive_name = node['file'].replace('.', '_')
             archive = tarfile.open(os.path.join(location, archive_name + '.tgz'), "w:gz")
             pathGraph = nx.DiGraph(name="Empty")
-            errors = self._archive_path(end, archive_name, archive, pathGraph, names_added=list())
+            errors = self._archive_path(end, archive_name, archive, pathGraph, names_added=list(),redacted=redacted)
             filename = os.path.abspath(os.path.join(self.dir, archive_name + '.json'))
             names_added.append(filename)
 
@@ -1120,3 +1252,58 @@ class ImageGraph:
             elif os.path.exists(filename):
                 os.remove(filename)
             return errors
+
+    def findOp(self, node_id, op):
+        """
+        Return true if if a predecessors edge contains
+        the given operation
+        :param node_id:
+        :return: bool
+        @type node_id: str
+        @rtype: bool
+        """
+        preds = self.predecessors(node_id)
+        if preds is None or len(preds) == 0:
+            return False
+        for pred in preds:
+            edge = self.get_edge(pred, node_id)
+            if 'op' in edge and edge['op'] == op:
+                return True
+            elif self.findOp( pred, op):
+                return True
+        return False
+
+
+    def findBase(self, node_id):
+        """
+        Find Base Node given node id
+        :param node_id:
+        :return: base node ID
+        @type node_id: str
+        @rtype: str
+        """
+        preds = self.predecessors(node_id)
+        if preds is None or len(preds) == 0:
+            return node_id
+        for pred in preds:
+            edge = self.get_edge(pred, node_id)
+            if edge['op'] == 'Donor':
+                continue
+            return self.findBase( pred)
+        return node_id
+
+    def predecessorsHaveCommonParent(self, node_id):
+        """
+        Determine if the predecessors of the current node have a common parent
+        not through a donor
+        :param node_id:
+        :return: base node ID
+        @type node_id: str
+        @rtype: bool
+        """
+        preds = self.predecessors(node_id)
+        if len(preds) == 1:
+            return False
+        base1 = self.findBase(preds[0])
+        base2 = self.findBase(preds[1])
+        return base1 == base2

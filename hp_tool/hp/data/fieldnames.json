@@ -34,11 +34,13 @@
     "HP-TransparentReflection":"",
     "HP-ReflectedObject":"",
     "HP-Shadows":"",
+	"HP-MultipleLightSources":"",
     "HP-HDR":"",
     "HP-CameraKinematics":"",
     "HP-App":"",
     "HP-Inside":"",
     "HP-Outside":"",
+	"HP-ReleaseForms":"",
     "HP-ProximitytoSource":"",
     "HP-MultiInput":"",
     "HP-AudioChannels":"",
@@ -56,5 +58,10 @@
     "HP-Orientation":"",
     "HP-DynamicStatic":"",
     "HP-NumberOfSpeakers":"",
-    "HP-Keywords":""
+    "HP-Keywords":"",
+    "HP-Thumbnails":"-Thumbnail",
+    "HP-PolyCount":"",
+    "HP-License":"",
+    "HP-seed":"",
+	"HP-Username":"HP-Username"
 }

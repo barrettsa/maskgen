@@ -1,12 +1,20 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+#==============================================================================
+
 from __future__ import print_function
 import argparse
 from maskgen import scenario_model
-from maskgen.software_loader import *
-import bulk_export
-from maskgen import graph_rules
 import csv
 import os
 from maskgen.batch import pick_projects
+from maskgen.preferences_initializer import initialize
+from maskgen import graph_rules
+from maskgen import maskGenPreferences
 
 
 def validate_export(error_writer,project, sm):
@@ -19,15 +27,15 @@ def validate_export(error_writer,project, sm):
     graph_rules.processProjectProperties(sm)
     sm.save()
     for err in errorList:
-        error_writer.writerow((name, str(err)))
+        error_writer.writerow((name, err[0].name, err[1],err[2],err[3]))
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('-u', '--username', help="optional username", required=False)
     parser.add_argument('--projects', help='Directory of projects')
     args = parser.parse_args()
-
-    graph_rules.setup()
+    initialize(maskGenPreferences, username=args.username)
 
     project_list = pick_projects(args.projects)
 

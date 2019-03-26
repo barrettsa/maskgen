@@ -1,3 +1,11 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+# ==============================================================================
+
 import maskgen
 import numpy as np
 import os
@@ -11,14 +19,15 @@ file.  The file is the format:
  where format is a string "jpg","png","cr2", etc.
 """
 
-cameraData = {}
+
 global cameraData
+cameraData = {}
 
 def loadCameraData(cameraDataFile):
     import json
     global cameraData
     absfile = os.path.abspath(cameraDataFile)
-    if absfile  in cameraData:
+    if absfile in cameraData:
         return cameraData[absfile]
     cameraData[absfile] = dict()
     with open(cameraDataFile) as fp:

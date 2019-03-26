@@ -1,3 +1,11 @@
+# =============================================================================
+# Authors: PAR Government
+# Organization: DARPA
+#
+# Copyright (c) 2016 PAR Government
+# All rights reserved.
+#==============================================================================
+
 import os
 import sys
 import tempfile
@@ -69,8 +77,8 @@ def parse_tables(imageFile):
     :return: list of lists of unsorted quantization tables
     """
 
-    if not (imageFile.lower().endswith('jpg') or imageFile.lower().endswith('jpeg')):
-        return []
+   # if not (os.path.splitext(imageFile.lower())[1][1:] not in ['jpeg','jpg','tiff','tif'] ):
+     #   return []
 
     # open the image and scan for q table marker "FF DB"
     s = open(imageFile, 'rb')
@@ -111,7 +119,6 @@ def estimate_qf(imageFile):
     :param imageFile: string containing jpg image filename
     :return: integer QF from 1 to 100
     """
-
     tables=  parse_tables(imageFile)
     qf = []
     for table in tables:
@@ -119,7 +126,8 @@ def estimate_qf(imageFile):
         if totalnum < 2 or len(qf) == 3:
             break
         total = sum ([table[i]for i in xrange(1,totalnum)])
-        qf.append(100 - total/(totalnum-1))
+        norm = total/(totalnum-1)
+        qf.append(100 - norm)
     if len(qf) == 0:
         return 100
     if len(qf) == 1:

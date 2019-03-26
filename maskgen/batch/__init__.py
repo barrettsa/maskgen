@@ -10,6 +10,10 @@ def pick_projects(directory):
     :param directory: string containing directory of subdirectories to search
     :return: list projects found under the given directory
     """
+    if os.path.isfile(directory):
+       with open(directory,'r') as fp:
+         return [x.strip() for x in fp.readlines()]
+
     ext = '.json'
     subs = [x[0] for x in os.walk(directory,followlinks=True)]
     projects = []
@@ -60,8 +64,14 @@ class BatchProcessor:
                 item_id = item_to_process[0] if isinstance(item_to_process,tuple) else item_to_process
                 logging.getLogger('maskgen').info('Project updating: ' + str(item_id))
                 errors = func_to_run(item_to_process)
-                for error in errors:
-                    error_writer.write((str(item_id), error))
+                if errors is not None:
+                    for error in errors:
+                        if type(error) == tuple:
+                            error_writer.writerow((str(item_id),) +  error)
+                        elif hasattr(error, 'astuple') and callable(getattr(error, 'astuple')):
+                            error_writer.writerow((str(item_id),) + error.astuple())
+                        else:
+                            error_writer.writerow((str(item_id), str(error)))
                 with self.lock:
                     self.count += 1
                     logging.getLogger('maskgen').info(
